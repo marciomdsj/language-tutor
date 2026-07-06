@@ -193,18 +193,24 @@ class TutorResponse:
     metadata: TurnMetadata
 
 
-def build_system_prompt(due_cards: list[db.Row]) -> str:
-    """Build the dynamic system prompt with learner profile and SRS cards.
+def build_system_prompt(
+    due_cards: list[db.Row],
+    recent_errors: list[dict] | None = None,
+) -> str:
+    """Build the dynamic system prompt with learner profile and SRS context.
 
-    The system prompt tells the LLM WHO it is (tutor), WHO the learner is
-    (level, target language), and WHAT to review (due cards injected from SRS).
+    The system prompt tells the LLM WHO it is (a proactive tutor), WHO the
+    learner is (level, language), WHAT to review (due cards), and WHAT the
+    learner has struggled with recently (recent errors).
 
     Args:
         due_cards: Cards that are due for review right now.
+        recent_errors: Recent corrections from past sessions (for context).
 
     Returns:
         The complete system prompt string.
     """
+    recent_errors = recent_errors or []
     cards_section = ""
     if due_cards:
         lines = []
@@ -217,30 +223,38 @@ def build_system_prompt(due_cards: list[db.Row]) -> str:
                 f'- "{card["front"]}" ({card["type"]}, {status}, accuracy: {accuracy})'
             )
         cards_section = (
-            "\n\nACTIVE REVIEW (important):\n"
-            "Try to NATURALLY include these words/expressions in the conversation,\n"
-            "so the learner needs to use them in their response:\n"
+            "\n\nACTIVE REVIEW — cards the learner needs to practice:\n"
             + "\n".join(lines)
-            + "\n\nDo NOT list them as flashcards. Weave them into natural conversation.\n"
+            + "\n\nYour job is to DESIGN the conversation so the learner MUST use these "
+            "words/structures to respond. Don't list them — create situations, questions, "
+            "or scenarios that naturally require them. For example, if the card is "
+            "'thoroughly', ask something like 'How deeply did you explore that topic?' "
+            "so the learner has a chance to use 'thoroughly' in their answer.\n"
             "In your report_metadata call, assess how well the learner used each one."
         )
 
-    return f"""You are a conversational English tutor for a {config.LEARNER_LEVEL}-level learner.
+    recent_errors_section = ""
+    if recent_errors:
+        err_lines = [f'- "{e["user_said"]}" → "{e["corrected"]}" ({e.get("error_type", "")})' for e in recent_errors[:5]]
+        recent_errors_section = (
+            "\n\nRECENT ERRORS — the learner has struggled with these recently:\n"
+            + "\n".join(err_lines)
+            + "\nGently steer the conversation to test whether they've improved on these."
+        )
 
-RULES:
+    return f"""You are a proactive conversational English tutor for a {config.LEARNER_LEVEL}-level learner.
+
+YOUR ROLE:
+- You LEAD the conversation. Don't just respond — propose topics, ask questions,
+  create scenarios. Be the teacher, not a passive chatbot.
 - Speak ONLY in English. The learner is practicing English.
-- Have a natural, engaging conversation on whatever topic the learner chooses.
-- If the learner makes an error, correct it BRIEFLY inline and continue the conversation.
-- Do NOT interrupt the flow with long grammar explanations.
-- For a {config.LEARNER_LEVEL} learner, focus on: nuanced vocabulary, idiomatic expressions, \
-subtle grammar (conditionals, subjunctive, collocations), and natural phrasing.
-- Keep responses concise (2-4 sentences) to maintain a conversational rhythm.
+- If the learner makes an error, correct it BRIEFLY inline and continue.
+- For {config.LEARNER_LEVEL}: focus on nuanced vocabulary, idiomatic expressions,
+  subtle grammar (conditionals, subjunctive, collocations), natural phrasing.
+- Keep responses concise (2-4 sentences) to maintain conversational rhythm.
 - ALWAYS call the report_metadata tool after your response.
-- This is CRITICAL: report ALL errors via the tool, even minor ones.
-  Never skip the tool call. If there are no errors, call it with empty arrays.
-- When correcting errors inline, still report them via the tool — the tool call
-  is how the learning system tracks progress.
-{cards_section}"""
+- Report ALL errors via the tool, even minor ones. Never skip the tool call.
+{cards_section}{recent_errors_section}"""
 
 
 # ---------------------------------------------------------------------------
@@ -296,12 +310,63 @@ class TutorLLM:
     is max(pass1, pass2) ≈ 5-7s, not the sum.
     """
 
-    def __init__(self, due_cards: list[db.Row] | None = None) -> None:
+    def __init__(
+        self,
+        due_cards: list[db.Row] | None = None,
+        recent_errors: list[dict] | None = None,
+    ) -> None:
         self.model = config.OLLAMA_MODEL
-        self.system_prompt = build_system_prompt(due_cards or [])
+        self.due_cards = due_cards or []
+        self.system_prompt = build_system_prompt(self.due_cards, recent_errors)
         self.history: list[dict[str, str]] = [
             {"role": "system", "content": self.system_prompt}
         ]
+
+    def generate_opening(self) -> TutorResponse:
+        """Generate the tutor's opening message to start the session.
+
+        The tutor speaks first — greeting the learner, suggesting a topic
+        or activity based on due cards and recent errors.  This makes the
+        experience feel guided, not like a blank chatbot.
+
+        Returns:
+            TutorResponse with the opening message (no error check needed).
+        """
+        if self.due_cards:
+            card_list = ", ".join(f'"{c["front"]}"' for c in self.due_cards[:3])
+            opening_prompt = (
+                f"Start the session. Greet the learner briefly and propose an "
+                f"engaging conversation topic or activity. You have these review "
+                f"cards to work into the conversation: {card_list}. "
+                f"Ask an opening question that naturally leads toward using them. "
+                f"Keep it to 2-3 sentences. Do NOT call any tools or output JSON."
+            )
+        else:
+            opening_prompt = (
+                "Start the session. Greet the learner briefly and propose an "
+                "engaging conversation topic or short activity appropriate for "
+                "a C1 English learner. Ask an opening question. "
+                "Keep it to 2-3 sentences. Do NOT call any tools or output JSON."
+            )
+
+        self.history.append({"role": "user", "content": opening_prompt})
+
+        response = ollama.chat(
+            model=self.model,
+            messages=self.history,
+            think=False,
+        )
+
+        reply_text = response.message.content or ""
+        # Strip any tool call artifacts the model might generate
+        reply_text = re.sub(
+            r"\*{0,2}report_metadata\*{0,2}.*", "", reply_text, flags=re.DOTALL
+        ).strip()
+        # Replace the fake user prompt with the assistant's opening
+        self.history.pop()  # remove the opening_prompt
+        self.history.append({"role": "assistant", "content": reply_text})
+
+        return TutorResponse(message=reply_text, metadata=TurnMetadata())
 
     def chat(self, user_message: str) -> TutorResponse:
         """Send a message and get the tutor's response with metadata.

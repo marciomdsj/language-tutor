@@ -392,3 +392,29 @@ def create_correction(
     )
     conn.commit()
     return cur.lastrowid  # type: ignore[return-value]
+
+
+def get_recent_errors(
+    conn: sqlite3.Connection,
+    limit: int = 10,
+) -> list[Row]:
+    """Return the most recent corrections across all sessions.
+
+    Used to feed the system prompt so the tutor knows what the learner
+    has been struggling with and can steer the conversation accordingly.
+
+    Args:
+        conn: Database connection.
+        limit: Max number of corrections to return.
+
+    Returns:
+        List of correction rows, newest first.
+    """
+    rows = conn.execute(
+        """SELECT user_said, corrected, error_type, explanation
+           FROM corrections
+           ORDER BY created_at DESC
+           LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]

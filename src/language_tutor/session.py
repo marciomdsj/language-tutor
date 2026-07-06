@@ -92,14 +92,21 @@ class SessionRunner:
         self.pending_new_words: list[PendingNewWord] = []
 
     def run(self) -> None:
-        """Run the full session: welcome → loop → final review → summary."""
+        """Run the full session: welcome → opening → loop → final review → summary."""
         due_cards = db.get_due_cards(self.conn)
+        recent_errors = db.get_recent_errors(self.conn, limit=5)
         card_stats = db.get_card_stats(self.conn)
 
         self._display_welcome(card_stats)
         self._display_due_cards(due_cards)
 
-        tutor = llm.TutorLLM(due_cards=due_cards)
+        tutor = llm.TutorLLM(due_cards=due_cards, recent_errors=recent_errors)
+
+        # Tutor speaks first — proactive opening
+        with console.status("[dim]Preparing session...[/dim]", spinner="dots"):
+            opening = tutor.generate_opening()
+        self._display_tutor_response(opening)
+        console.print()
 
         try:
             self._conversation_loop(tutor)
