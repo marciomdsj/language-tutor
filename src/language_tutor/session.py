@@ -148,47 +148,50 @@ class SessionRunner:
     def _get_input(self) -> str | None:
         """Get input from the user — text or voice.
 
+        Uses a loop instead of recursion for command handling and retries.
+
         Returns:
             The user's message, or None to end the session.
         """
-        try:
-            raw = console.input("[bold blue]You:[/bold blue] ").strip()
-        except EOFError:
-            return None
+        while True:
+            try:
+                raw = console.input("[bold blue]You:[/bold blue] ").strip()
+            except EOFError:
+                return None
 
-        # Commands
-        if raw.lower() in ("quit", "exit"):
-            return None
-        if raw.lower() == "mute":
-            self.tts_muted = True
-            console.print("[dim]TTS muted.[/dim]")
-            return self._get_input()
-        if raw.lower() == "unmute":
-            self.tts_muted = False
-            console.print("[dim]TTS unmuted.[/dim]")
-            return self._get_input()
+            # Commands
+            if raw.lower() in ("quit", "exit"):
+                return None
+            if raw.lower() == "mute":
+                self.tts_muted = True
+                console.print("[dim]TTS muted.[/dim]")
+                continue
+            if raw.lower() == "unmute":
+                self.tts_muted = False
+                console.print("[dim]TTS unmuted.[/dim]")
+                continue
 
-        # Text input
-        if raw:
-            return raw
+            # Text input
+            if raw:
+                return raw
 
-        # Voice input — empty Enter triggers recording
-        console.print("  [yellow]🎤 Recording... press Enter to stop[/yellow]")
-        audio_bytes = audio.record_until_enter()
+            # Voice input — empty Enter triggers recording
+            console.print("  [yellow]🎤 Recording... press Enter to stop[/yellow]")
+            audio_bytes = audio.record_until_enter()
 
-        if not audio_bytes:
-            console.print("  [dim]No audio captured.[/dim]")
-            return self._get_input()
+            if not audio_bytes:
+                console.print("  [dim]No audio captured.[/dim]")
+                continue
 
-        with console.status("[dim]Transcribing...[/dim]", spinner="dots"):
-            text = self.stt.transcribe(audio_bytes)
+            with console.status("[dim]Transcribing...[/dim]", spinner="dots"):
+                text = self.stt.transcribe(audio_bytes)
 
-        if not text:
-            console.print("  [dim]Could not understand audio. Try again.[/dim]")
-            return self._get_input()
+            if not text:
+                console.print("  [dim]Could not understand audio. Try again.[/dim]")
+                continue
 
-        console.print(f"  [dim]📝 {text}[/dim]")
-        return text
+            console.print(f"  [dim]📝 {text}[/dim]")
+            return text
 
     def _display_tutor_response(self, response: llm.TutorResponse) -> None:
         """Display tutor response as text and play TTS audio."""

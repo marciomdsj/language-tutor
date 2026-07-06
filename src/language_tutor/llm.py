@@ -383,12 +383,21 @@ class TutorLLM:
         """
         self.history.append({"role": "user", "content": user_message})
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            conv_future = pool.submit(self._conversation_pass)
-            err_future = pool.submit(self._error_check_pass, user_message)
+        # Only run the error check pass if the message is long enough to
+        # contain meaningful errors.  Short messages (greetings, yes/no)
+        # don't benefit from the extra ~5s latency.
+        worth_checking = len(user_message.split()) >= 4
 
-            conv_result = conv_future.result()
-            err_result = err_future.result()
+        if worth_checking:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                conv_future = pool.submit(self._conversation_pass)
+                err_future = pool.submit(self._error_check_pass, user_message)
+
+                conv_result = conv_future.result()
+                err_result = err_future.result()
+        else:
+            conv_result = self._conversation_pass()
+            err_result = []
 
         reply_text = conv_result["reply"]
         self.history.append({"role": "assistant", "content": reply_text})
@@ -403,6 +412,10 @@ class TutorLLM:
     def _conversation_pass(self) -> dict:
         """Pass 1: natural conversation with card assessments and new words.
 
+        If the model returns only tool calls with no text (happens when it
+        focuses entirely on metadata), we make a follow-up call without
+        tools to get the actual conversational response.
+
         Returns:
             Dict with 'reply' (str) and 'metadata' (TurnMetadata).
         """
@@ -416,6 +429,15 @@ class TutorLLM:
         assistant_msg = response.message
         reply_text = assistant_msg.content or ""
         metadata = self._extract_metadata(assistant_msg)
+
+        # If model returned only tool calls with no visible text, retry without tools
+        if not reply_text.strip():
+            retry = ollama.chat(
+                model=self.model,
+                messages=self.history,
+                think=False,
+            )
+            reply_text = retry.message.content or ""
 
         return {"reply": reply_text, "metadata": metadata}
 
