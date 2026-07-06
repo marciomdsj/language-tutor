@@ -17,6 +17,9 @@ env/
 # Database (local data — recreated on first run)
 data/*.db
 
+# Voice models (downloaded on first run)
+data/models/
+
 # IDE
 .vscode/
 .idea/
@@ -34,3 +37,6 @@ htmlcov/
 
 # Ruff / Black
 .ruff_cache/
+
+# Claude Code
+.claude/
