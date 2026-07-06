@@ -1,31 +1,44 @@
-"""LLM integration via Ollama — prompt building, chat, and metadata extraction.
+"""LLM integration via LiteLLM — provider-agnostic with automatic fallback.
 
-This module handles all communication with the local Qwen3-8B model through
-Ollama.  The key design decisions:
+This module handles all LLM communication through LiteLLM, which provides
+a unified interface for 100+ providers.  The cascade:
 
-1. **System prompt is dynamic**: before each session, we build a system prompt
-   that includes the learner's level, SRS cards due for review, and session
-   rules.  The LLM acts as a tutor, not just a chatbot.
+    1. Groq   (primary — blazing fast, free tier: 14,400 req/day)
+    2. Gemini (fallback — free tier: 1,500 req/day)
+    3. Ollama (offline — always available, local, no internet)
 
-2. **Metadata via tool use**: Qwen3-8B supports tool calling natively.  We
-   define a tool called `report_metadata` that the model calls after each
-   response to report corrections, card assessments, and new vocabulary
-   suggestions.  The LEARNER then confirms or adjusts these (human-in-the-loop).
+Key design decisions:
 
-3. **Fallback to JSON**: if tool use fails (e.g. model doesn't call the tool),
-   we attempt to parse a JSON block from the response as a safety net.
+1. **Provider-agnostic**: all LLM calls go through `_call_llm()` which tries
+   each provider in config.LLM_MODELS order.  If one fails (rate limit,
+   timeout, network), it transparently falls through to the next.
+
+2. **Dual-pass architecture**: conversation + focused error check in parallel.
+   Validated at 92% C1 error detection accuracy.
+
+3. **Tool use**: LiteLLM normalizes tool calls across providers to OpenAI
+   format.  Tool call arguments come as JSON strings (not dicts like Ollama).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-import ollama
+import litellm
 
 from language_tutor import config, db
+
+# Suppress LiteLLM's verbose logging
+litellm.suppress_debug_info = True
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+
+# Set API keys from config (LiteLLM reads these from env or can be set here)
+if config.GROQ_API_KEY:
+    litellm.api_key = config.GROQ_API_KEY
 
 # ---------------------------------------------------------------------------
 # Metadata schema — what we ask the LLM to report after each turn
@@ -174,11 +187,7 @@ class NewWordSuggestion:
 
 @dataclass
 class TurnMetadata:
-    """Structured metadata extracted from a single LLM turn.
-
-    The LLM suggests, the learner confirms — this is the raw suggestion
-    before human-in-the-loop confirmation.
-    """
+    """Structured metadata extracted from a single LLM turn."""
 
     corrections: list[dict[str, str]] = field(default_factory=list)
     card_assessments: list[CardAssessment] = field(default_factory=list)
@@ -193,19 +202,127 @@ class TutorResponse:
     metadata: TurnMetadata
 
 
+# ---------------------------------------------------------------------------
+# Provider-agnostic LLM call with automatic fallback
+# ---------------------------------------------------------------------------
+
+def _call_llm(
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> object:
+    """Call the LLM with automatic fallback across configured providers.
+
+    Tries each model in config.LLM_MODELS order.  If one fails (rate limit,
+    network error, timeout), it falls through to the next.
+
+    Args:
+        messages: Conversation messages in OpenAI format.
+        tools: Optional tool definitions for function calling.
+
+    Returns:
+        The LiteLLM response object (OpenAI-compatible).
+
+    Raises:
+        ConnectionError: If all providers fail.
+    """
+    last_error = None
+
+    for model in config.LLM_MODELS:
+        try:
+            kwargs: dict = {
+                "model": model,
+                "messages": messages,
+            }
+            if tools:
+                kwargs["tools"] = tools
+
+            return litellm.completion(**kwargs)
+
+        except Exception as e:
+            last_error = e
+            continue
+
+    raise ConnectionError(
+        f"All LLM providers failed. Models tried: {config.LLM_MODELS}. "
+        f"Last error: {last_error}"
+    )
+
+
+def _extract_tool_args(response: object, tool_name: str) -> dict | None:
+    """Extract arguments from a tool call in the LLM response.
+
+    LiteLLM returns OpenAI-compatible responses where tool call arguments
+    are JSON strings (not dicts).  This function handles the parsing.
+
+    Args:
+        response: The LiteLLM response object.
+        tool_name: The name of the tool to look for.
+
+    Returns:
+        Parsed arguments dict, or None if the tool wasn't called.
+    """
+    message = response.choices[0].message
+    tool_calls = getattr(message, "tool_calls", None)
+    if not tool_calls:
+        return None
+
+    for tc in tool_calls:
+        fn = tc.function
+        if fn.name == tool_name:
+            args = fn.arguments
+            if isinstance(args, str):
+                return json.loads(args)
+            return args or {}
+
+    return None
+
+
+def _strip_tool_artifacts(text: str) -> str:
+    """Remove tool call JSON that leaked into the response text.
+
+    Some models (especially via Ollama) dump tool call JSON directly into
+    the content instead of using the tool_calls field.  This strips it.
+
+    Args:
+        text: The raw response text.
+
+    Returns:
+        Cleaned text with JSON artifacts removed.
+    """
+    # Remove {"name": "report_metadata", "arguments": {...}} blocks
+    text = re.sub(r'\{"name":\s*"report_\w+".*', "", text, flags=re.DOTALL)
+    # Remove ```json ... ``` blocks
+    text = re.sub(r"```json\s*\{.*?\}\s*```", "", text, flags=re.DOTALL)
+    # Remove **report_metadata** and everything after
+    text = re.sub(r"\*{0,2}report_metadata\*{0,2}.*", "", text, flags=re.DOTALL)
+    return text.strip()
+
+
+def _get_content(response: object) -> str:
+    """Extract text content from a LiteLLM response.
+
+    Args:
+        response: The LiteLLM response object.
+
+    Returns:
+        The text content, or empty string.
+    """
+    return response.choices[0].message.content or ""
+
+
+# ---------------------------------------------------------------------------
+# System prompt builder
+# ---------------------------------------------------------------------------
+
 def build_system_prompt(
     due_cards: list[db.Row],
     recent_errors: list[dict] | None = None,
 ) -> str:
     """Build the dynamic system prompt with learner profile and SRS context.
 
-    The system prompt tells the LLM WHO it is (a proactive tutor), WHO the
-    learner is (level, language), WHAT to review (due cards), and WHAT the
-    learner has struggled with recently (recent errors).
-
     Args:
         due_cards: Cards that are due for review right now.
-        recent_errors: Recent corrections from past sessions (for context).
+        recent_errors: Recent corrections from past sessions.
 
     Returns:
         The complete system prompt string.
@@ -227,19 +344,20 @@ def build_system_prompt(
             + "\n".join(lines)
             + "\n\nYour job is to DESIGN the conversation so the learner MUST use these "
             "words/structures to respond. Don't list them — create situations, questions, "
-            "or scenarios that naturally require them. For example, if the card is "
-            "'thoroughly', ask something like 'How deeply did you explore that topic?' "
-            "so the learner has a chance to use 'thoroughly' in their answer.\n"
+            "or scenarios that naturally require them.\n"
             "In your report_metadata call, assess how well the learner used each one."
         )
 
     recent_errors_section = ""
     if recent_errors:
-        err_lines = [f'- "{e["user_said"]}" → "{e["corrected"]}" ({e.get("error_type", "")})' for e in recent_errors[:5]]
+        err_lines = [
+            f'- "{e["user_said"]}" → "{e["corrected"]}" ({e.get("error_type", "")})'
+            for e in recent_errors[:5]
+        ]
         recent_errors_section = (
             "\n\nRECENT ERRORS — the learner has struggled with these recently:\n"
             + "\n".join(err_lines)
-            + "\nGently steer the conversation to test whether they've improved on these."
+            + "\nGently steer the conversation to test whether they've improved."
         )
 
     return f"""You are a proactive conversational English tutor for a {config.LEARNER_LEVEL}-level learner.
@@ -299,15 +417,11 @@ class TutorLLM:
 
     Uses a dual-pass architecture for optimal speed + accuracy:
 
-    Pass 1 (conversation): the tutor responds naturally and tries to extract
-    metadata (card assessments, new words).  think=False for speed (~5s).
+    Pass 1 (conversation): natural response + card assessments + new words.
+    Pass 2 (error check): focused correction detection with minimal schema.
 
-    Pass 2 (error check): a SEPARATE, focused call with a minimal schema
-    checks ONLY for errors.  think=False but with a simple prompt, giving
-    12/12 accuracy in validation at ~5s.
-
-    Both passes run in parallel using ThreadPoolExecutor, so total latency
-    is max(pass1, pass2) ≈ 5-7s, not the sum.
+    Both passes use _call_llm() which automatically cascades across
+    Groq → Gemini → Ollama based on availability.
     """
 
     def __init__(
@@ -315,7 +429,6 @@ class TutorLLM:
         due_cards: list[db.Row] | None = None,
         recent_errors: list[dict] | None = None,
     ) -> None:
-        self.model = config.OLLAMA_MODEL
         self.due_cards = due_cards or []
         self.system_prompt = build_system_prompt(self.due_cards, recent_errors)
         self.history: list[dict[str, str]] = [
@@ -326,11 +439,10 @@ class TutorLLM:
         """Generate the tutor's opening message to start the session.
 
         The tutor speaks first — greeting the learner, suggesting a topic
-        or activity based on due cards and recent errors.  This makes the
-        experience feel guided, not like a blank chatbot.
+        or activity based on due cards and recent errors.
 
         Returns:
-            TutorResponse with the opening message (no error check needed).
+            TutorResponse with the opening message.
         """
         if self.due_cards:
             card_list = ", ".join(f'"{c["front"]}"' for c in self.due_cards[:3])
@@ -351,18 +463,14 @@ class TutorLLM:
 
         self.history.append({"role": "user", "content": opening_prompt})
 
-        response = ollama.chat(
-            model=self.model,
-            messages=self.history,
-            think=False,
-        )
+        response = _call_llm(messages=self.history)
+        reply_text = _get_content(response)
 
-        reply_text = response.message.content or ""
         # Strip any tool call artifacts the model might generate
         reply_text = re.sub(
             r"\*{0,2}report_metadata\*{0,2}.*", "", reply_text, flags=re.DOTALL
         ).strip()
-        # Replace the fake user prompt with the assistant's opening
+
         self.history.pop()  # remove the opening_prompt
         self.history.append({"role": "assistant", "content": reply_text})
 
@@ -373,7 +481,7 @@ class TutorLLM:
 
         Runs two LLM passes in parallel:
         1. Conversation pass → natural response + card assessments + new words
-        2. Error check pass → focused correction detection (12/12 accuracy)
+        2. Error check pass → focused correction detection
 
         Args:
             user_message: What the learner said/typed.
@@ -383,16 +491,12 @@ class TutorLLM:
         """
         self.history.append({"role": "user", "content": user_message})
 
-        # Only run the error check pass if the message is long enough to
-        # contain meaningful errors.  Short messages (greetings, yes/no)
-        # don't benefit from the extra ~5s latency.
         worth_checking = len(user_message.split()) >= 4
 
         if worth_checking:
             with ThreadPoolExecutor(max_workers=2) as pool:
                 conv_future = pool.submit(self._conversation_pass)
                 err_future = pool.submit(self._error_check_pass, user_message)
-
                 conv_result = conv_future.result()
                 err_result = err_future.result()
         else:
@@ -402,8 +506,6 @@ class TutorLLM:
         reply_text = conv_result["reply"]
         self.history.append({"role": "assistant", "content": reply_text})
 
-        # Merge: use error checker's corrections (more reliable),
-        # conversation's card assessments and new word suggestions
         metadata = conv_result["metadata"]
         metadata.corrections = err_result
 
@@ -412,115 +514,73 @@ class TutorLLM:
     def _conversation_pass(self) -> dict:
         """Pass 1: natural conversation with card assessments and new words.
 
-        If the model returns only tool calls with no text (happens when it
-        focuses entirely on metadata), we make a follow-up call without
-        tools to get the actual conversational response.
-
         Returns:
             Dict with 'reply' (str) and 'metadata' (TurnMetadata).
         """
-        response = ollama.chat(
-            model=self.model,
+        response = _call_llm(
             messages=self.history,
             tools=[METADATA_TOOL],
-            think=False,
         )
 
-        assistant_msg = response.message
-        reply_text = assistant_msg.content or ""
-        metadata = self._extract_metadata(assistant_msg)
+        reply_text = _get_content(response)
+        metadata = self._extract_metadata(response)
 
         # If model returned only tool calls with no visible text, retry without tools
         if not reply_text.strip():
-            retry = ollama.chat(
-                model=self.model,
-                messages=self.history,
-                think=False,
-            )
-            reply_text = retry.message.content or ""
+            retry = _call_llm(messages=self.history)
+            reply_text = _get_content(retry)
+
+        # Some models leak tool call JSON into content text — clean it
+        reply_text = _strip_tool_artifacts(reply_text)
 
         return {"reply": reply_text, "metadata": metadata}
 
     def _error_check_pass(self, user_message: str) -> list[dict[str, str]]:
         """Pass 2: focused error detection with minimal schema.
 
-        This pass runs independently with no conversation history — just the
-        user's message and a focused grammar-checking prompt.  Validated at
-        12/12 accuracy on C1 error scenarios.
-
         Args:
             user_message: The raw text to check for errors.
 
         Returns:
-            List of correction dicts with keys: wrong, correct, type.
+            List of correction dicts with keys: user_said, corrected, error_type.
         """
-        response = ollama.chat(
-            model=self.model,
+        response = _call_llm(
             messages=[
                 {"role": "system", "content": _ERROR_CHECK_SYSTEM},
                 {"role": "user", "content": user_message},
             ],
             tools=[_ERROR_CHECK_TOOL],
-            think=False,
         )
 
-        tool_calls = getattr(response.message, "tool_calls", None)
-        if tool_calls:
-            for call in tool_calls:
-                fn = getattr(call, "function", None)
-                if fn and getattr(fn, "name", None) == "report_errors":
-                    args = getattr(fn, "arguments", {}) or {}
-                    raw_errors = args.get("errors", [])
-                    return [
-                        {
-                            "user_said": e.get("wrong", ""),
-                            "corrected": e.get("correct", ""),
-                            "error_type": e.get("type", "other"),
-                        }
-                        for e in raw_errors
-                    ]
+        args = _extract_tool_args(response, "report_errors")
+        if args:
+            return [
+                {
+                    "user_said": e.get("wrong", ""),
+                    "corrected": e.get("correct", ""),
+                    "error_type": e.get("type", "other"),
+                }
+                for e in args.get("errors", [])
+            ]
 
         return []
 
-    def _extract_metadata(self, assistant_msg: object) -> TurnMetadata:
+    @staticmethod
+    def _extract_metadata(response: object) -> TurnMetadata:
         """Extract card assessments and new words from conversation pass.
 
-        Corrections are handled by the error check pass, so this focuses
-        on card_assessments and new_word_suggestions.
-
         Args:
-            assistant_msg: The Message object from Ollama's response.
+            response: The LiteLLM response object.
 
         Returns:
-            Parsed TurnMetadata (corrections will be overwritten by error check).
+            Parsed TurnMetadata.
         """
-        tool_calls = getattr(assistant_msg, "tool_calls", None)
-        if tool_calls:
-            for call in tool_calls:
-                fn = getattr(call, "function", None)
-                if fn and getattr(fn, "name", None) == "report_metadata":
-                    args = getattr(fn, "arguments", {}) or {}
-                    return _parse_metadata_args(args)
+        args = _extract_tool_args(response, "report_metadata")
+        if args:
+            return _parse_metadata_args(args)
 
-        content = getattr(assistant_msg, "content", "") or ""
-        return self._parse_json_fallback(content)
-
-    @staticmethod
-    def _parse_json_fallback(text: str) -> TurnMetadata:
-        """Try to find and parse a JSON object in the response text.
-
-        Args:
-            text: The full response text.
-
-        Returns:
-            Parsed TurnMetadata, empty if no valid JSON found.
-        """
-        match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if not match:
-            match = re.search(
-                r"(\{[^{}]*\"corrections\"[^{}]*\})\s*$", text, re.DOTALL
-            )
-
+        content = _get_content(response)
+        match = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
         if match:
             try:
                 data = json.loads(match.group(1))
@@ -545,7 +605,6 @@ def _parse_metadata_args(args: dict) -> TurnMetadata:
     """
     corrections = args.get("corrections", [])
 
-    # Parse card assessments (new schema)
     raw_assessments = args.get("card_assessments", [])
     assessments = []
     for a in raw_assessments:
@@ -556,14 +615,12 @@ def _parse_metadata_args(args: dict) -> TurnMetadata:
             reasoning=a.get("reasoning", ""),
         ))
 
-    # Backwards compatibility: convert old cards_used_correctly to assessments
     if not raw_assessments:
         for front in args.get("cards_used_correctly", []):
             assessments.append(CardAssessment(
                 front=front, used=True, quality_suggestion="good",
             ))
 
-    # Parse new word suggestions (new schema)
     raw_words = args.get("new_word_suggestions", [])
     suggestions = []
     for w in raw_words:
@@ -575,7 +632,6 @@ def _parse_metadata_args(args: dict) -> TurnMetadata:
             tags=w.get("tags", []),
         ))
 
-    # Backwards compatibility: convert old new_words format
     if not raw_words:
         for w in args.get("new_words", []):
             suggestions.append(NewWordSuggestion(

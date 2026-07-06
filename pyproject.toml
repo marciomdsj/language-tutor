@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
-    "ollama>=0.4",           # Ollama Python client for local LLM (Qwen3-8B)
+    "litellm>=1.40",         # Unified LLM gateway (Groq, Gemini, Ollama, 100+ providers)
     "rich>=13.0",            # Rich terminal output (colors, tables, progress bars)
     "python-dotenv>=1.0",    # Load .env files for configuration
     "vosk>=0.3",             # STT — local speech recognition (NOT whisper)

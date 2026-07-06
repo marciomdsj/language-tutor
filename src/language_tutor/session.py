@@ -387,7 +387,7 @@ class SessionRunner:
             Panel(
                 "[bold cyan]Language Tutor[/bold cyan] — "
                 f"Level: [yellow]{config.LEARNER_LEVEL}[/yellow] | "
-                f"Model: [green]{config.OLLAMA_MODEL}[/green]\n"
+                f"Model: [green]{config.PRIMARY_MODEL}[/green]\n"
                 f"Deck: {card_stats.get('total', 0)} cards ({stats_line})\n\n"
                 "[dim]Type in English, or press Enter to speak.\n"
                 "Commands: [bold]mute[/bold] | [bold]unmute[/bold] | [bold]quit[/bold][/dim]",
