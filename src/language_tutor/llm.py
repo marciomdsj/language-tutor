@@ -297,6 +297,11 @@ def _call_llm(
         return client.chat.completions.create(**kwargs)
 
     except Exception as e:
+        # If tool use failed (malformed JSON from model), retry without tools
+        if "tool_use_failed" in str(e) and tools:
+            kwargs.pop("tools", None)
+            return client.chat.completions.create(**kwargs)
+
         raise ConnectionError(
             f"LLM call failed (model: {model}): {e}"
         ) from e
