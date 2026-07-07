@@ -15,11 +15,13 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 import streamlit as st
+from streamlit_mic_recorder import mic_recorder
 
 from language_tutor import analytics, config, db, llm, srs
 from language_tutor.content import fetch_article
 from language_tutor.llm import find_card_by_front
 from language_tutor.planner import ACTIVITY_REGISTRY, suggest_activities
+from language_tutor.tts import get_tts_provider
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -225,6 +227,12 @@ def init_state() -> None:
         st.session_state.session_id = None
     if "warmed_up" not in st.session_state:
         st.session_state.warmed_up = False
+    if "tts_enabled" not in st.session_state:
+        st.session_state.tts_enabled = True
+    if "tts_provider" not in st.session_state:
+        st.session_state.tts_provider = get_tts_provider()
+    if "pending_voice" not in st.session_state:
+        st.session_state.pending_voice = None
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +320,24 @@ def render_chat() -> None:
             st.rerun()
         return
 
-    # Chat interface
+    # Voice/TTS controls
+    col_tts, col_mic = st.columns([1, 1])
+    with col_tts:
+        st.session_state.tts_enabled = st.toggle(
+            "🔊 Tutor voice", value=st.session_state.tts_enabled
+        )
+    with col_mic:
+        audio_data = mic_recorder(
+            start_prompt="🎤 Record",
+            stop_prompt="⏹️ Stop",
+            just_once=True,
+            use_container_width=True,
+            key="mic_recorder",
+        )
+
+    st.divider()
+
+    # Chat interface — display history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"], avatar="🗡️" if msg["role"] == "assistant" else "👤"):
             st.markdown(msg["content"])
@@ -324,9 +349,43 @@ def render_chat() -> None:
                         f'</span>',
                         unsafe_allow_html=True,
                     )
+            # Play TTS for the last assistant message
+            if (msg["role"] == "assistant"
+                    and "audio" in msg
+                    and msg is st.session_state.messages[-1]):
+                st.audio(msg["audio"], format="audio/mp3", autoplay=True)
 
-    # Chat input
-    if prompt := st.chat_input("Type in English..."):
+    # Process voice input → transcribe → treat as text prompt
+    prompt = None
+
+    if audio_data and audio_data.get("bytes"):
+        with st.spinner("Transcribing..."):
+            from language_tutor.stt import get_stt_provider
+            stt = get_stt_provider()
+
+            # Convert WAV bytes from mic to raw PCM for Vosk
+            import io
+            import wave
+            wav_io = io.BytesIO(audio_data["bytes"])
+            try:
+                with wave.open(wav_io) as wf:
+                    pcm_bytes = wf.readframes(wf.getnframes())
+                transcribed = stt.transcribe(pcm_bytes)
+            except Exception:
+                transcribed = ""
+
+        if transcribed:
+            st.info(f"📝 *\"{transcribed}\"*")
+            prompt = transcribed
+        else:
+            st.warning("Could not understand audio. Try again or type instead.")
+
+    # Text input
+    if text_input := st.chat_input("Type in English..."):
+        prompt = text_input
+
+    # Process the prompt (from text or voice)
+    if prompt:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user", avatar="👤"):
             st.markdown(prompt)
@@ -337,7 +396,6 @@ def render_chat() -> None:
 
             st.markdown(response.message)
 
-            # Show corrections inline
             if response.metadata.corrections:
                 for c in response.metadata.corrections:
                     st.markdown(
@@ -346,6 +404,16 @@ def render_chat() -> None:
                         f'</span>',
                         unsafe_allow_html=True,
                     )
+
+            # TTS — generate and play tutor audio
+            tts_audio = None
+            if st.session_state.tts_enabled and response.message:
+                try:
+                    tts = st.session_state.tts_provider
+                    tts_audio = tts.synthesize(response.message)
+                    st.audio(tts_audio, format="audio/mp3", autoplay=True)
+                except Exception:
+                    pass
 
         # Persist corrections and create cards
         conn = get_conn()
@@ -360,7 +428,6 @@ def render_chat() -> None:
                     error_type=c.get("error_type"),
                     explanation=c.get("explanation"),
                 )
-                # Create a card from each correction if not already in deck
                 if corrected_text and not find_card_by_front(conn, corrected_text):
                     db.create_card(
                         conn,
@@ -370,7 +437,6 @@ def render_chat() -> None:
                         context=c.get("explanation", ""),
                     )
 
-            # Create cards from new word suggestions
             for w in response.metadata.new_word_suggestions:
                 if w.word and not find_card_by_front(conn, w.word):
                     db.create_card(
@@ -386,11 +452,13 @@ def render_chat() -> None:
             "role": "assistant",
             "content": response.message,
             "corrections": response.metadata.corrections,
+            "audio": tts_audio,
         })
 
     # End session button
     st.divider()
     if st.button("🛑 End Session", type="secondary"):
+        conn = get_conn()
         if st.session_state.session_id:
             db.end_session(
                 conn, st.session_state.session_id,
