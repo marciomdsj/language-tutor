@@ -25,7 +25,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import litellm
@@ -206,6 +205,30 @@ class TutorResponse:
 # Provider-agnostic LLM call with automatic fallback
 # ---------------------------------------------------------------------------
 
+_warmed_up = False
+
+
+def warmup() -> str:
+    """Prime the LiteLLM HTTP client with a cheap call.
+
+    The first LiteLLM call per process has ~30s overhead (HTTP client init,
+    SSL handshake).  Subsequent calls reuse the connection and are <1s.
+    Call this once at session start to absorb the cold start.
+
+    Returns:
+        The name of the model that responded (for display).
+    """
+    global _warmed_up
+    if _warmed_up:
+        return config.PRIMARY_MODEL
+
+    response = _call_llm(
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    _warmed_up = True
+    return getattr(response, "model", config.PRIMARY_MODEL)
+
+
 def _call_llm(
     messages: list[dict],
     tools: list[dict] | None = None,
@@ -232,6 +255,7 @@ def _call_llm(
             kwargs: dict = {
                 "model": model,
                 "messages": messages,
+                "timeout": 30,
             }
             if tools:
                 kwargs["tools"] = tools
@@ -479,9 +503,14 @@ class TutorLLM:
     def chat(self, user_message: str) -> TutorResponse:
         """Send a message and get the tutor's response with metadata.
 
-        Runs two LLM passes in parallel:
+        Runs two LLM passes sequentially (not parallel):
         1. Conversation pass → natural response + card assessments + new words
         2. Error check pass → focused correction detection
+
+        Sequential is better than parallel here because cloud providers
+        (Groq, Gemini) respond in <0.5s each, and ThreadPoolExecutor threads
+        don't share the warmed HTTP connection — causing cold starts per thread.
+        Sequential: ~1s total.  Parallel with cold starts: ~60s.
 
         Args:
             user_message: What the learner said/typed.
@@ -491,16 +520,11 @@ class TutorLLM:
         """
         self.history.append({"role": "user", "content": user_message})
 
-        worth_checking = len(user_message.split()) >= 4
+        conv_result = self._conversation_pass()
 
-        if worth_checking:
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                conv_future = pool.submit(self._conversation_pass)
-                err_future = pool.submit(self._error_check_pass, user_message)
-                conv_result = conv_future.result()
-                err_result = err_future.result()
+        if len(user_message.split()) >= 4:
+            err_result = self._error_check_pass(user_message)
         else:
-            conv_result = self._conversation_pass()
             err_result = []
 
         reply_text = conv_result["reply"]

@@ -100,6 +100,11 @@ class SessionRunner:
         self._display_welcome(card_stats)
         self._display_due_cards(due_cards)
 
+        # Warm up LLM connection (absorbs ~30s cold start under the spinner)
+        with console.status("[dim]Connecting to LLM...[/dim]", spinner="dots"):
+            active_model = llm.warmup()
+        console.print(f"[dim]Connected to {active_model}[/dim]\n")
+
         tutor = llm.TutorLLM(due_cards=due_cards, recent_errors=recent_errors)
 
         # Tutor speaks first — proactive opening
