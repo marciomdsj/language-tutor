@@ -363,16 +363,39 @@ def render_chat() -> None:
             from language_tutor.stt import get_stt_provider
             stt = get_stt_provider()
 
-            # Convert WAV bytes from mic to raw PCM for Vosk
+            # Browser records WAV at 44.1/48kHz — Vosk needs 16kHz mono int16.
+            # Resample using numpy.
             import io
             import wave
-            wav_io = io.BytesIO(audio_data["bytes"])
+            import numpy as np
+            from language_tutor.audio import SAMPLE_RATE
+
+            transcribed = ""
             try:
+                wav_io = io.BytesIO(audio_data["bytes"])
                 with wave.open(wav_io) as wf:
-                    pcm_bytes = wf.readframes(wf.getnframes())
+                    orig_rate = wf.getframerate()
+                    n_channels = wf.getnchannels()
+                    raw = wf.readframes(wf.getnframes())
+
+                # Convert to numpy array
+                samples = np.frombuffer(raw, dtype=np.int16)
+
+                # Stereo → mono
+                if n_channels > 1:
+                    samples = samples.reshape(-1, n_channels).mean(axis=1).astype(np.int16)
+
+                # Resample to 16kHz if needed
+                if orig_rate != SAMPLE_RATE:
+                    duration = len(samples) / orig_rate
+                    new_length = int(duration * SAMPLE_RATE)
+                    indices = np.linspace(0, len(samples) - 1, new_length).astype(int)
+                    samples = samples[indices]
+
+                pcm_bytes = samples.astype(np.int16).tobytes()
                 transcribed = stt.transcribe(pcm_bytes)
             except Exception:
-                transcribed = ""
+                pass
 
         if transcribed:
             st.info(f"📝 *\"{transcribed}\"*")
