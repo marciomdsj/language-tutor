@@ -205,38 +205,50 @@ class TutorResponse:
 # Provider-agnostic LLM call with automatic fallback
 # ---------------------------------------------------------------------------
 
-_warmed_up = False
+_active_model: str | None = None
 
 
 def warmup() -> str:
-    """Prime the LiteLLM HTTP client with a cheap call.
+    """Prime the LiteLLM HTTP client and lock the active provider.
 
-    The first LiteLLM call per process has ~30s overhead (HTTP client init,
-    SSL handshake).  Subsequent calls reuse the connection and are <1s.
-    Call this once at session start to absorb the cold start.
+    Tries each model in the cascade until one responds.  The winning
+    model is locked as _active_model — all subsequent calls use it
+    directly without retrying the full cascade.  This avoids the
+    30s timeout + Ollama fallback on every call.
 
     Returns:
         The name of the model that responded (for display).
     """
-    global _warmed_up
-    if _warmed_up:
-        return config.PRIMARY_MODEL
+    global _active_model
+    if _active_model:
+        return _active_model
 
-    response = _call_llm(
-        messages=[{"role": "user", "content": "hi"}],
-    )
-    _warmed_up = True
-    return getattr(response, "model", config.PRIMARY_MODEL)
+    for model in config.LLM_MODELS:
+        try:
+            response = litellm.completion(
+                model=model,
+                messages=[{"role": "user", "content": "hi"}],
+                timeout=120,
+            )
+            _active_model = model
+            return getattr(response, "model", model)
+        except Exception:
+            continue
+
+    # Nothing worked — fall back to first model and hope for the best
+    _active_model = config.LLM_MODELS[0]
+    return _active_model
 
 
 def _call_llm(
     messages: list[dict],
     tools: list[dict] | None = None,
 ) -> object:
-    """Call the LLM with automatic fallback across configured providers.
+    """Call the LLM using the active provider (set by warmup).
 
-    Tries each model in config.LLM_MODELS order.  If one fails (rate limit,
-    network error, timeout), it falls through to the next.
+    After warmup locks a provider, all calls go directly to it — no
+    cascade, no timeout-then-fallback overhead.  If the active provider
+    fails, it falls through to the others as a safety net.
 
     Args:
         messages: Conversation messages in OpenAI format.
@@ -248,14 +260,19 @@ def _call_llm(
     Raises:
         ConnectionError: If all providers fail.
     """
+    global _active_model
     last_error = None
 
-    for model in config.LLM_MODELS:
+    # Try the active model first (fast path — no cascade overhead)
+    models_to_try = [_active_model] if _active_model else []
+    models_to_try.extend(m for m in config.LLM_MODELS if m != _active_model)
+
+    for model in models_to_try:
         try:
             kwargs: dict = {
                 "model": model,
                 "messages": messages,
-                "timeout": 30,
+                "timeout": 120,
             }
             if tools:
                 kwargs["tools"] = tools
@@ -267,7 +284,7 @@ def _call_llm(
             continue
 
     raise ConnectionError(
-        f"All LLM providers failed. Models tried: {config.LLM_MODELS}. "
+        f"All LLM providers failed. Models tried: {models_to_try}. "
         f"Last error: {last_error}"
     )
 
