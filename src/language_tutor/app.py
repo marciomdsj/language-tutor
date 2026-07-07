@@ -372,30 +372,64 @@ def render_chat() -> None:
 
             transcribed = ""
             try:
-                wav_io = io.BytesIO(audio_data["bytes"])
-                with wave.open(wav_io) as wf:
-                    orig_rate = wf.getframerate()
-                    n_channels = wf.getnchannels()
-                    raw = wf.readframes(wf.getnframes())
+                raw_bytes = audio_data["bytes"]
 
-                # Convert to numpy array
-                samples = np.frombuffer(raw, dtype=np.int16)
+                # Detect format: mic_recorder may return WAV or raw WebM/OGG
+                is_wav = raw_bytes[:4] == b"RIFF"
 
-                # Stereo → mono
-                if n_channels > 1:
-                    samples = samples.reshape(-1, n_channels).mean(axis=1).astype(np.int16)
+                if is_wav:
+                    wav_io = io.BytesIO(raw_bytes)
+                    with wave.open(wav_io) as wf:
+                        orig_rate = wf.getframerate()
+                        n_channels = wf.getnchannels()
+                        sample_width = wf.getsampwidth()
+                        raw = wf.readframes(wf.getnframes())
 
-                # Resample to 16kHz if needed
-                if orig_rate != SAMPLE_RATE:
-                    duration = len(samples) / orig_rate
-                    new_length = int(duration * SAMPLE_RATE)
-                    indices = np.linspace(0, len(samples) - 1, new_length).astype(int)
-                    samples = samples[indices]
+                    # Handle different sample widths
+                    if sample_width == 2:
+                        samples = np.frombuffer(raw, dtype=np.int16)
+                    elif sample_width == 4:
+                        # 32-bit float WAV — common from browser
+                        samples_f = np.frombuffer(raw, dtype=np.float32)
+                        samples = (samples_f * 32767).clip(-32768, 32767).astype(np.int16)
+                    else:
+                        samples = np.frombuffer(raw, dtype=np.int16)
 
-                pcm_bytes = samples.astype(np.int16).tobytes()
-                transcribed = stt.transcribe(pcm_bytes)
-            except Exception:
-                pass
+                    # Stereo → mono
+                    if n_channels > 1:
+                        samples = samples.reshape(-1, n_channels)[:, 0].astype(np.int16)
+
+                    # Resample to 16kHz
+                    if orig_rate != SAMPLE_RATE:
+                        duration = len(samples) / orig_rate
+                        new_length = int(duration * SAMPLE_RATE)
+                        if new_length > 0:
+                            indices = np.linspace(0, len(samples) - 1, new_length).astype(int)
+                            samples = samples[indices]
+
+                    pcm_bytes = samples.astype(np.int16).tobytes()
+                else:
+                    # Not WAV — try using soundfile which handles more formats
+                    import soundfile as sf
+                    audio_io = io.BytesIO(raw_bytes)
+                    data, orig_rate = sf.read(audio_io)
+                    # Convert to mono int16 at 16kHz
+                    if data.ndim > 1:
+                        data = data[:, 0]
+                    if orig_rate != SAMPLE_RATE:
+                        duration = len(data) / orig_rate
+                        new_length = int(duration * SAMPLE_RATE)
+                        if new_length > 0:
+                            indices = np.linspace(0, len(data) - 1, new_length).astype(int)
+                            data = data[indices]
+                    samples = (data * 32767).clip(-32768, 32767).astype(np.int16)
+                    pcm_bytes = samples.tobytes()
+
+                if len(pcm_bytes) > 0:
+                    transcribed = stt.transcribe(pcm_bytes)
+
+            except Exception as e:
+                st.error(f"Audio processing error: {e}")
 
         if transcribed:
             st.info(f"📝 *\"{transcribed}\"*")
