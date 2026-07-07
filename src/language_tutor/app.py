@@ -397,6 +397,7 @@ def render_chat() -> None:
             stop_prompt="⏹️ Done",
             just_once=True,
             use_container_width=True,
+            format="wav",
             key="mic_recorder",
         )
     with voice_col3:
