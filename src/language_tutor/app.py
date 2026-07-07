@@ -178,14 +178,79 @@ st.markdown("""
     /* Correction badges */
     .correction-badge {
         display: inline-block;
-        padding: 2px 8px;
-        border-radius: 3px;
-        font-size: 0.75rem;
-        margin: 2px;
+        padding: 3px 10px;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        margin: 3px 2px;
+        font-family: 'JetBrains Mono', monospace;
     }
     .badge-error { background: #3d1515; color: #ff6b6b; border: 1px solid #ff6b6b33; }
     .badge-correct { background: #153d15; color: #6bff6b; border: 1px solid #6bff6b33; }
     .badge-card { background: #15153d; color: #6b6bff; border: 1px solid #6b6bff33; }
+
+    /* Voice controls bar */
+    .voice-bar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 16px;
+        background: #12121a;
+        border: 1px solid #1a1a2e;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+    }
+
+    /* Audio player styling */
+    audio {
+        height: 32px;
+        border-radius: 4px;
+        filter: invert(0.85) hue-rotate(180deg);
+    }
+
+    /* Mic recorder button styling */
+    .stCustomComponent iframe {
+        border-radius: 4px;
+    }
+
+    /* Transcription bubble */
+    .transcription-bubble {
+        background: #1a1a2e;
+        border-left: 3px solid #00D4FF;
+        padding: 8px 14px;
+        border-radius: 0 6px 6px 0;
+        margin: 6px 0;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.9rem;
+        color: #00D4FF;
+    }
+
+    /* Toggle switch */
+    .stToggle label {
+        font-family: 'JetBrains Mono', monospace !important;
+        color: #888 !important;
+    }
+
+    /* Status indicators */
+    .status-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 6px;
+    }
+    .status-online { background: #6bff6b; box-shadow: 0 0 6px #6bff6b44; }
+    .status-offline { background: #ff6b6b; }
+
+    /* End session button */
+    .end-session-btn button {
+        background-color: #2a1515 !important;
+        color: #ff6b6b !important;
+        border: 1px solid #ff6b6b33 !important;
+    }
+    .end-session-btn button:hover {
+        background-color: #ff6b6b !important;
+        color: #0a0a0f !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -320,19 +385,25 @@ def render_chat() -> None:
             st.rerun()
         return
 
-    # Voice/TTS controls
-    col_tts, col_mic = st.columns([1, 1])
-    with col_tts:
+    # Voice controls — compact bar
+    voice_col1, voice_col2, voice_col3 = st.columns([2, 3, 7])
+    with voice_col1:
         st.session_state.tts_enabled = st.toggle(
-            "🔊 Tutor voice", value=st.session_state.tts_enabled
+            "🔊 Voice", value=st.session_state.tts_enabled
         )
-    with col_mic:
+    with voice_col2:
         audio_data = mic_recorder(
-            start_prompt="🎤 Record",
-            stop_prompt="⏹️ Stop",
+            start_prompt="🎤 Speak",
+            stop_prompt="⏹️ Done",
             just_once=True,
             use_container_width=True,
             key="mic_recorder",
+        )
+    with voice_col3:
+        st.markdown(
+            '<span style="color:#555;font-size:0.75rem">'
+            'Toggle voice for tutor audio · Click Speak to record</span>',
+            unsafe_allow_html=True,
         )
 
     st.divider()
@@ -341,17 +412,20 @@ def render_chat() -> None:
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"], avatar="🗡️" if msg["role"] == "assistant" else "👤"):
             st.markdown(msg["content"])
+
+            # Corrections as styled badges
             if "corrections" in msg and msg["corrections"]:
-                for c in msg["corrections"]:
-                    st.markdown(
-                        f'<span class="correction-badge badge-error">'
-                        f'✗ {c.get("user_said", "")} → {c.get("corrected", "")}'
-                        f'</span>',
-                        unsafe_allow_html=True,
-                    )
-            # Play TTS for the last assistant message
+                corrections_html = " ".join(
+                    f'<span class="correction-badge badge-error">'
+                    f'✗ {c.get("user_said", "")} → {c.get("corrected", "")}'
+                    f'</span>'
+                    for c in msg["corrections"]
+                )
+                st.markdown(corrections_html, unsafe_allow_html=True)
+
+            # TTS audio player for assistant messages
             if (msg["role"] == "assistant"
-                    and "audio" in msg
+                    and msg.get("audio")
                     and msg is st.session_state.messages[-1]):
                 st.audio(msg["audio"], format="audio/mp3", autoplay=True)
 
@@ -432,7 +506,10 @@ def render_chat() -> None:
                 st.error(f"Audio processing error: {e}")
 
         if transcribed:
-            st.info(f"📝 *\"{transcribed}\"*")
+            st.markdown(
+                f'<div class="transcription-bubble">📝 {transcribed}</div>',
+                unsafe_allow_html=True,
+            )
             prompt = transcribed
         else:
             st.warning("Could not understand audio. Try again or type instead.")
@@ -512,9 +589,13 @@ def render_chat() -> None:
             "audio": tts_audio,
         })
 
-    # End session button
+    # End session
     st.divider()
-    if st.button("🛑 End Session", type="secondary"):
+    with st.container():
+        st.markdown('<div class="end-session-btn">', unsafe_allow_html=True)
+        end_clicked = st.button("🛑 End Session", type="secondary")
+        st.markdown('</div>', unsafe_allow_html=True)
+    if end_clicked:
         conn = get_conn()
         if st.session_state.session_id:
             db.end_session(
