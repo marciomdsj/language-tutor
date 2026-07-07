@@ -27,9 +27,15 @@ dev = [
     "black>=24.0",
     "ruff>=0.5",
 ]
+ui = [
+    "streamlit>=1.35",
+    "plotly>=5.20",
+]
 
 [project.scripts]
 tutor = "language_tutor.main:main"
+
+# Web UI: streamlit run src/language_tutor/app.py --server.port 8888
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/language_tutor"]
