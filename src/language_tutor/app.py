@@ -18,6 +18,7 @@ import streamlit as st
 
 from language_tutor import analytics, config, db, llm, srs
 from language_tutor.content import fetch_article
+from language_tutor.llm import find_card_by_front
 from language_tutor.planner import ACTIVITY_REGISTRY, suggest_activities
 
 # ---------------------------------------------------------------------------
@@ -344,6 +345,41 @@ def render_chat() -> None:
                         f'✗ {c.get("user_said", "")} → {c.get("corrected", "")}'
                         f'</span>',
                         unsafe_allow_html=True,
+                    )
+
+        # Persist corrections and create cards
+        conn = get_conn()
+        if st.session_state.session_id:
+            for c in response.metadata.corrections:
+                corrected_text = c.get("corrected", "")
+                db.create_correction(
+                    conn,
+                    session_id=st.session_state.session_id,
+                    user_said=c.get("user_said", ""),
+                    corrected=corrected_text,
+                    error_type=c.get("error_type"),
+                    explanation=c.get("explanation"),
+                )
+                # Create a card from each correction if not already in deck
+                if corrected_text and not find_card_by_front(conn, corrected_text):
+                    db.create_card(
+                        conn,
+                        front=corrected_text,
+                        card_type="grammar",
+                        back=f'Correct form of: "{c.get("user_said", "")}"',
+                        context=c.get("explanation", ""),
+                    )
+
+            # Create cards from new word suggestions
+            for w in response.metadata.new_word_suggestions:
+                if w.word and not find_card_by_front(conn, w.word):
+                    db.create_card(
+                        conn,
+                        front=w.word,
+                        card_type=w.card_type,
+                        back=w.back,
+                        context=w.context,
+                        tags=w.tags,
                     )
 
         st.session_state.messages.append({
