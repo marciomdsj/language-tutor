@@ -10,6 +10,7 @@ warm amber/gold accents, monospace fonts.
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import plotly.graph_objects as go
@@ -203,10 +204,18 @@ PLOTLY_LAYOUT = dict(
 # ---------------------------------------------------------------------------
 # Session state initialization
 # ---------------------------------------------------------------------------
+def get_conn() -> sqlite3.Connection:
+    """Get a database connection (safe for Streamlit's threading model).
+
+    Creates a fresh connection each call. SQLite with check_same_thread=False
+    and WAL mode handles this efficiently. The data persists in data/tutor.db
+    across server restarts — cards, sessions, corrections are never lost.
+    """
+    return db.get_connection()
+
+
 def init_state() -> None:
     """Initialize Streamlit session state."""
-    if "conn" not in st.session_state:
-        st.session_state.conn = db.get_connection()
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "tutor" not in st.session_state:
@@ -225,7 +234,7 @@ def render_sidebar() -> str:
     with st.sidebar:
         # Brand image
         if BRAND_PATH.exists():
-            st.image(str(BRAND_PATH), use_container_width=True)
+            st.image(str(BRAND_PATH), width="stretch")
 
         st.markdown("## ⚔️ LANGUAGE TUTOR")
         st.markdown(
@@ -243,7 +252,7 @@ def render_sidebar() -> str:
         st.divider()
 
         # Quick stats
-        conn = st.session_state.conn
+        conn = get_conn()
         card_stats = db.get_card_stats(conn)
         due_cards = db.get_due_cards(conn)
 
@@ -265,7 +274,7 @@ def render_sidebar() -> str:
 def render_chat() -> None:
     """Render the chat/conversation page."""
     st.markdown("# 💬 CONVERSATION")
-    conn = st.session_state.conn
+    conn = get_conn()
 
     # Activity selection
     if st.session_state.tutor is None:
@@ -278,7 +287,7 @@ def render_chat() -> None:
             cls = ACTIVITY_REGISTRY[act_type]
             with cols[i]:
                 if st.button(f"**{cls.name}**\n\n{cls.description}", key=f"act_{i}",
-                             use_container_width=True):
+                             width="stretch"):
                     chosen = act_type
 
         if chosen:
@@ -365,7 +374,7 @@ def render_chat() -> None:
 def render_analytics() -> None:
     """Render the analytics/stats page."""
     st.markdown("# 📊 ANALYTICS")
-    conn = st.session_state.conn
+    conn = get_conn()
 
     metrics = analytics._compute_metrics(conn)
 
@@ -407,7 +416,7 @@ def render_analytics() -> None:
                 showlegend=True,
                 legend=dict(font=dict(color="#888")),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     with tab2:
         if metrics.accuracy_by_type:
@@ -428,7 +437,7 @@ def render_analytics() -> None:
                 yaxis=dict(gridcolor="#1a1a2e", autorange="reversed"),
                 xaxis=dict(gridcolor="#1a1a2e", title="Count"),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
         if metrics.top_errors:
             st.markdown("### Most Repeated Mistakes")
@@ -459,11 +468,11 @@ def render_analytics() -> None:
                     angularaxis=dict(gridcolor="#1a1a2e", color="#e0e0e0"),
                 ),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     # AI Insights button
     st.divider()
-    if st.button("🤖 Generate AI Insights", use_container_width=True):
+    if st.button("🤖 Generate AI Insights", width="stretch"):
         with st.spinner("Analyzing your learning data..."):
             report = analytics.generate_report(conn, include_insights=True)
         if report.insights:
@@ -476,7 +485,7 @@ def render_analytics() -> None:
 def render_cards() -> None:
     """Render the card deck management page."""
     st.markdown("# 🃏 CARD DECK")
-    conn = st.session_state.conn
+    conn = get_conn()
 
     tab1, tab2 = st.tabs(["📋 All Cards", "⏰ Due Now"])
 
