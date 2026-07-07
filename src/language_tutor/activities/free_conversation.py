@@ -76,6 +76,11 @@ class FreeConversation:
 
             if raw.lower() in ("quit", "exit", "done"):
                 return None
+            if raw.lower() == "stats":
+                from language_tutor import analytics
+                report = analytics.generate_report(self.conn, include_insights=False)
+                report.display()
+                continue
             if raw.lower() == "mute":
                 self.tts_muted = True
                 console.print("[dim]TTS muted.[/dim]")
