@@ -64,15 +64,17 @@ CREATE TABLE IF NOT EXISTS cards (
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at     TEXT    NOT NULL DEFAULT (datetime('now')),
-    ended_at       TEXT,
-    lang           TEXT    NOT NULL DEFAULT 'en',
-    topic          TEXT,
-    total_turns    INTEGER NOT NULL DEFAULT 0,
-    errors_found   INTEGER NOT NULL DEFAULT 0,
-    cards_reviewed INTEGER NOT NULL DEFAULT 0,
-    summary        TEXT
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    ended_at         TEXT,
+    lang             TEXT    NOT NULL DEFAULT 'en',
+    activity_type    TEXT    NOT NULL DEFAULT 'free_conversation',
+    skills_practiced TEXT    NOT NULL DEFAULT '[]',
+    topic            TEXT,
+    total_turns      INTEGER NOT NULL DEFAULT 0,
+    errors_found     INTEGER NOT NULL DEFAULT 0,
+    cards_reviewed   INTEGER NOT NULL DEFAULT 0,
+    summary          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS corrections (
@@ -307,19 +309,24 @@ def get_card_stats(conn: sqlite3.Connection, lang: str = "en") -> Row:
 # Sessions CRUD
 # ---------------------------------------------------------------------------
 
-def create_session(conn: sqlite3.Connection, lang: str = "en") -> int:
+def create_session(
+    conn: sqlite3.Connection,
+    lang: str = "en",
+    activity_type: str = "free_conversation",
+) -> int:
     """Start a new conversation session.
 
     Args:
         conn: Database connection.
         lang: Session language.
+        activity_type: The activity type for this session.
 
     Returns:
         The new session id.
     """
     cur = conn.execute(
-        "INSERT INTO sessions (lang) VALUES (?)",
-        (lang,),
+        "INSERT INTO sessions (lang, activity_type) VALUES (?, ?)",
+        (lang, activity_type),
     )
     conn.commit()
     return cur.lastrowid  # type: ignore[return-value]
@@ -332,6 +339,7 @@ def end_session(
     errors_found: int,
     cards_reviewed: int,
     summary: str | None = None,
+    skills_practiced: list[str] | None = None,
 ) -> None:
     """Close a session with final stats.
 
@@ -342,19 +350,50 @@ def end_session(
         errors_found: Number of errors the LLM identified.
         cards_reviewed: Number of SRS cards that appeared.
         summary: Optional end-of-session summary text.
+        skills_practiced: List of skills used (e.g. ["writing", "speaking"]).
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    skills_json = json.dumps(skills_practiced or [])
     conn.execute(
         """UPDATE sessions
-           SET ended_at       = ?,
-               total_turns    = ?,
-               errors_found   = ?,
-               cards_reviewed = ?,
-               summary        = ?
+           SET ended_at          = ?,
+               total_turns       = ?,
+               errors_found      = ?,
+               cards_reviewed    = ?,
+               summary           = ?,
+               skills_practiced  = ?
            WHERE id = ?""",
-        (now, total_turns, errors_found, cards_reviewed, summary, session_id),
+        (now, total_turns, errors_found, cards_reviewed, summary, skills_json, session_id),
     )
     conn.commit()
+
+
+def get_recent_sessions(
+    conn: sqlite3.Connection,
+    limit: int = 7,
+) -> list[Row]:
+    """Return the most recent completed sessions.
+
+    Used by the planner to decide which activity to suggest based
+    on what the learner has been practicing recently.
+
+    Args:
+        conn: Database connection.
+        limit: Max number of sessions to return.
+
+    Returns:
+        List of session rows, newest first.
+    """
+    rows = conn.execute(
+        """SELECT id, activity_type, skills_practiced, started_at,
+                  total_turns, errors_found
+           FROM sessions
+           WHERE ended_at IS NOT NULL
+           ORDER BY started_at DESC
+           LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
