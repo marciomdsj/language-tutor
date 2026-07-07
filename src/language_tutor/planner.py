@@ -22,6 +22,7 @@ from language_tutor import db
 from language_tutor.activities.article_summary import ArticleSummary
 from language_tutor.activities.error_correction import ErrorCorrection
 from language_tutor.activities.free_conversation import FreeConversation
+from language_tutor.activities.vocabulary_drill import VocabularyDrill
 from language_tutor.activities.writing_prompt import WritingPrompt
 
 console = Console()
@@ -32,6 +33,7 @@ ACTIVITY_REGISTRY = {
     "writing_prompt": WritingPrompt,
     "article_summary": ArticleSummary,
     "error_correction": ErrorCorrection,
+    "vocabulary_drill": VocabularyDrill,
 }
 
 
@@ -96,6 +98,13 @@ def suggest_activities(conn: sqlite3.Connection) -> list[str]:
     )
     if grammar_errors >= 5:
         scores["error_correction"] += 5.0
+
+    # Vocabulary drill: high priority when many cards are due
+    scores["vocabulary_drill"] = 2.0
+    if len(due_cards) >= 5:
+        scores["vocabulary_drill"] += 6.0
+    elif len(due_cards) >= 3:
+        scores["vocabulary_drill"] += 3.0
 
     # Penalize repeating the last activity
     if last_activity and last_activity in scores:

@@ -27,6 +27,7 @@ from language_tutor.activities.free_conversation import FreeConversation
 from language_tutor.activities.writing_prompt import WritingPrompt
 from language_tutor.activities.article_summary import ArticleSummary
 from language_tutor.activities.error_correction import ErrorCorrection
+from language_tutor.activities.vocabulary_drill import VocabularyDrill
 from language_tutor.planner import ACTIVITY_REGISTRY, present_choices, suggest_activities
 from language_tutor.stt import get_stt_provider
 from language_tutor.tts import get_tts_provider
@@ -169,6 +170,8 @@ class SessionRunner:
             return ArticleSummary(tutor=tutor, conn=self.conn, debug=self.debug)
         elif activity_type == "error_correction":
             return ErrorCorrection(tutor=tutor, conn=self.conn, debug=self.debug)
+        elif activity_type == "vocabulary_drill":
+            return VocabularyDrill(tutor=tutor, conn=self.conn, debug=self.debug)
         else:
             return FreeConversation(
                 tutor=tutor, conn=self.conn, tts=self.tts,
