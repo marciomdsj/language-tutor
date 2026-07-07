@@ -142,7 +142,7 @@ class TestSessionsCRUD:
 
     def test_create_and_end_session(self, conn: sqlite3.Connection) -> None:
         # Arrange
-        session_id = db.create_session(conn)
+        session_id = db.create_session(conn, activity_type="writing_prompt")
 
         # Act
         db.end_session(
@@ -152,6 +152,7 @@ class TestSessionsCRUD:
             errors_found=3,
             cards_reviewed=5,
             summary="Good session overall.",
+            skills_practiced=["writing", "grammar"],
         )
 
         # Assert
@@ -162,6 +163,24 @@ class TestSessionsCRUD:
         assert row["total_turns"] == 10
         assert row["errors_found"] == 3
         assert row["ended_at"] is not None
+        assert row["activity_type"] == "writing_prompt"
+        assert '"writing"' in row["skills_practiced"]
+        assert '"grammar"' in row["skills_practiced"]
+
+    def test_get_recent_sessions(self, conn: sqlite3.Connection) -> None:
+        # Arrange
+        s1 = db.create_session(conn, activity_type="free_conversation")
+        db.end_session(conn, s1, 5, 2, 3, skills_practiced=["speaking"])
+        s2 = db.create_session(conn, activity_type="writing_prompt")
+        db.end_session(conn, s2, 3, 1, 0, skills_practiced=["writing"])
+
+        # Act
+        recent = db.get_recent_sessions(conn, limit=5)
+
+        # Assert
+        assert len(recent) == 2
+        types = {r["activity_type"] for r in recent}
+        assert types == {"free_conversation", "writing_prompt"}
 
 
 class TestCorrectionsCRUD:

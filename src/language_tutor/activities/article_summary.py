@@ -114,6 +114,7 @@ class ArticleSummary:
         console.print(f"\n[bold green]Tutor:[/bold green] {evaluation.message}\n")
 
         result.corrections.extend(evaluation.metadata.corrections)
+        result.card_assessments.extend(evaluation.metadata.card_assessments)
         result.new_word_suggestions.extend(evaluation.metadata.new_word_suggestions)
 
         # Optional: discuss the article

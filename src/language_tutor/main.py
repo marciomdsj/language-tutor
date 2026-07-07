@@ -42,11 +42,11 @@ def main() -> None:
     try:
         runner = SessionRunner(debug=args.debug)
         runner.run()
-    except ConnectionError:
+    except ConnectionError as e:
         console.print(
-            "[bold red]Error:[/bold red] Could not connect to Ollama. "
-            f"Is it running at {config.OLLAMA_HOST}?\n"
-            "Start it with: [bold]ollama serve[/bold]"
+            f"[bold red]Error:[/bold red] All LLM providers failed.\n"
+            f"Tried: {', '.join(config.LLM_MODELS)}\n"
+            f"Check: API keys in .env, internet connection, or Ollama running."
         )
         sys.exit(1)
     except Exception as e:

@@ -14,12 +14,10 @@ The fetched content is trimmed to a suitable length for a language exercise
 from __future__ import annotations
 
 import random
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from urllib.request import urlopen, Request
-from urllib.error import URLError
-
-from language_tutor import llm as llm_module
 
 # Target length for exercise content (words)
 TARGET_WORDS = 300
@@ -138,8 +136,6 @@ def _fetch_from_rss(feed_info: dict) -> Article | None:
         return None
 
     # Clean HTML tags from description
-    import re
-
     clean_text = re.sub(r"<[^>]+>", "", description).strip()
     clean_text = re.sub(r"\s+", " ", clean_text)
 
