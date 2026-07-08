@@ -9,6 +9,7 @@ warm amber/gold accents, monospace fonts.
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 from pathlib import Path
@@ -364,7 +365,6 @@ def _transcribe_voice() -> str | None:
     if not audio_data or not audio_data.get("bytes"):
         return None
     try:
-        import io
         from openai import OpenAI
         whisper_client = OpenAI(
             api_key=config.GROQ_API_KEY,
@@ -633,8 +633,12 @@ def _render_free_conversation() -> None:
             st.markdown(prompt)
 
         with st.chat_message("assistant", avatar="🗡️"):
-            with st.spinner("Thinking..."):
-                response = st.session_state.tutor.chat(prompt)
+            try:
+                with st.spinner("Thinking..."):
+                    response = st.session_state.tutor.chat(prompt)
+            except Exception as e:
+                st.error(f"LLM error: {e}")
+                return
             st.markdown(response.message)
             if response.metadata.corrections:
                 for c in response.metadata.corrections:

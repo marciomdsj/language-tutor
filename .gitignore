@@ -20,6 +20,12 @@ data/*.db
 # Voice models (downloaded on first run)
 data/models/
 
+# User profile (personal data)
+data/user_profile.json
+
+# Streamlit agent skills (environment-specific)
+.agents/
+
 # IDE
 .vscode/
 .idea/
