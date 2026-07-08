@@ -287,7 +287,7 @@ def get_conn() -> sqlite3.Connection:
 DEFAULT_PROFILE = {
     "name": "",
     "profession": "",
-    "interests": ["technology", "science", "travel"],
+    "interests": [],
     "preferred_topics": [],
 }
 

@@ -529,12 +529,20 @@ class TutorLLM:
         Returns:
             TutorResponse with the opening message.
         """
+        preferred = self.user_context.get("preferred_topics", [])
         interests = self.user_context.get("interests", [])
+        profession = self.user_context.get("profession", "")
+        all_topics = preferred + interests
+        if profession:
+            all_topics = [profession] + all_topics
+
         interests_hint = ""
-        if interests:
+        if all_topics:
+            topics_str = ", ".join(dict.fromkeys(all_topics))  # deduplicate
             interests_hint = (
-                f"Pick a topic related to one of the learner's interests: "
-                f"{', '.join(interests)}. VARY the topic from previous sessions. "
+                f"Pick a topic related to ONE of these (the learner's interests): "
+                f"{topics_str}. Choose something SPECIFIC, not generic. "
+                f"VARY the topic from previous sessions — do NOT repeat. "
             )
 
         if self.due_cards:
@@ -619,13 +627,17 @@ class TutorLLM:
         reply_text = _get_content(response)
         metadata = self._extract_metadata(response)
 
+        # Some models leak tool call JSON into content text — clean it
+        reply_text = _strip_tool_artifacts(reply_text)
+
         # If model returned only tool calls with no visible text, retry without tools
         if not reply_text.strip():
             retry = _call_llm(messages=self.history)
-            reply_text = _get_content(retry)
+            reply_text = _strip_tool_artifacts(_get_content(retry))
 
-        # Some models leak tool call JSON into content text — clean it
-        reply_text = _strip_tool_artifacts(reply_text)
+        # Last resort — never return empty
+        if not reply_text.strip():
+            reply_text = "Could you elaborate on that? I'd like to hear more."
 
         return {"reply": reply_text, "metadata": metadata}
 
