@@ -291,14 +291,114 @@ def init_state() -> None:
         st.session_state.tutor = None
     if "session_id" not in st.session_state:
         st.session_state.session_id = None
-    if "warmed_up" not in st.session_state:
-        st.session_state.warmed_up = False
     if "tts_enabled" not in st.session_state:
         st.session_state.tts_enabled = True
     if "tts_provider" not in st.session_state:
         st.session_state.tts_provider = get_tts_provider()
     if "pending_voice" not in st.session_state:
         st.session_state.pending_voice = None
+    # Activity state machine
+    if "activity_type" not in st.session_state:
+        st.session_state.activity_type = None
+    if "activity_phase" not in st.session_state:
+        st.session_state.activity_phase = None
+    if "activity_data" not in st.session_state:
+        st.session_state.activity_data = {}
+    # SRS review accumulation
+    if "pending_reviews" not in st.session_state:
+        st.session_state.pending_reviews = {}
+    if "pending_new_words" not in st.session_state:
+        st.session_state.pending_new_words = []
+
+
+QUALITY_MAP_NAMES = {
+    srs.QUALITY_AGAIN: "again",
+    srs.QUALITY_HARD: "hard",
+    srs.QUALITY_GOOD: "good",
+    srs.QUALITY_EASY: "easy",
+}
+
+
+def _quality_from_suggestion(suggestion: str) -> int:
+    """Convert a quality suggestion string to its numeric value."""
+    return {"again": srs.QUALITY_AGAIN, "hard": srs.QUALITY_HARD,
+            "good": srs.QUALITY_GOOD, "easy": srs.QUALITY_EASY}.get(
+        suggestion.lower(), srs.QUALITY_GOOD
+    )
+
+
+def _speak(text: str) -> bytes | None:
+    """Generate TTS audio if enabled. Returns audio bytes or None."""
+    if not st.session_state.tts_enabled or not text:
+        return None
+    try:
+        return st.session_state.tts_provider.synthesize(text)
+    except Exception:
+        return None
+
+
+def _transcribe_voice() -> str | None:
+    """Transcribe pending voice input from sidebar mic. Returns text or None."""
+    audio_data = st.session_state.get("pending_voice")
+    if not audio_data or not audio_data.get("bytes"):
+        return None
+    try:
+        import io
+        from openai import OpenAI
+        whisper_client = OpenAI(
+            api_key=config.GROQ_API_KEY,
+            base_url="https://api.groq.com/openai/v1",
+        )
+        audio_file = io.BytesIO(audio_data["bytes"])
+        audio_file.name = "recording.wav"
+        result = whisper_client.audio.transcriptions.create(
+            file=audio_file, model="whisper-large-v3-turbo", language="en",
+        )
+        st.session_state.pending_voice = None
+        return result.text.strip() or None
+    except Exception as e:
+        st.error(f"Transcription error: {e}")
+        return None
+
+
+def _accumulate_srs(metadata: llm.TurnMetadata) -> None:
+    """Accumulate card assessments and new words for final review."""
+    conn = get_conn()
+    for assessment in metadata.card_assessments:
+        card_id = find_card_by_front(conn, assessment.front)
+        if card_id and card_id not in st.session_state.pending_reviews:
+            st.session_state.pending_reviews[card_id] = {
+                "card_id": card_id,
+                "front": assessment.front,
+                "quality": _quality_from_suggestion(assessment.quality_suggestion),
+                "reasoning": assessment.reasoning,
+            }
+    for w in metadata.new_word_suggestions:
+        if w.word and not find_card_by_front(conn, w.word):
+            st.session_state.pending_new_words.append(w)
+
+
+def _save_corrections(metadata: llm.TurnMetadata) -> None:
+    """Save corrections to DB and create cards from them."""
+    conn = get_conn()
+    session_id = st.session_state.session_id
+    if not session_id:
+        return
+    for c in metadata.corrections:
+        corrected = c.get("corrected", "")
+        db.create_correction(
+            conn, session_id=session_id,
+            user_said=c.get("user_said", ""),
+            corrected=corrected,
+            error_type=c.get("error_type"),
+            explanation=c.get("explanation"),
+        )
+        if corrected and not find_card_by_front(conn, corrected):
+            db.create_card(
+                conn, front=corrected, card_type="grammar",
+                back=f'Correct form of: "{c.get("user_said", "")}"',
+                context=c.get("explanation", ""),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -362,119 +462,146 @@ def render_sidebar() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Chat page
+# Chat page — activity state machine
 # ---------------------------------------------------------------------------
 def render_chat() -> None:
-    """Render the chat/conversation page."""
+    """Render the chat page with activity-specific flows."""
     st.markdown("# 💬 CONVERSATION")
+
+    phase = st.session_state.activity_phase
+
+    if phase == "session_review":
+        _render_session_review()
+    elif st.session_state.tutor is None:
+        _render_activity_selection()
+    elif st.session_state.activity_type == "vocabulary_drill":
+        _render_vocabulary_drill()
+    elif st.session_state.activity_type == "writing_prompt":
+        _render_writing_prompt()
+    elif st.session_state.activity_type == "article_summary":
+        _render_article_summary()
+    elif st.session_state.activity_type == "error_correction":
+        _render_error_correction()
+    else:
+        _render_free_conversation()
+
+
+def _render_activity_selection() -> None:
+    """Show activity buttons and initialize session on selection."""
     conn = get_conn()
+    st.markdown("### Choose your activity")
+    suggestions = suggest_activities(conn)
 
-    # Activity selection
-    if st.session_state.tutor is None:
-        st.markdown("### Choose your activity")
-        suggestions = suggest_activities(conn)
+    cols = st.columns(len(suggestions))
+    chosen = None
+    for i, act_type in enumerate(suggestions):
+        cls = ACTIVITY_REGISTRY[act_type]
+        with cols[i]:
+            if st.button(f"**{cls.name}**\n\n{cls.description}", key=f"act_{i}",
+                         width="stretch"):
+                chosen = act_type
 
-        cols = st.columns(len(suggestions))
-        chosen = None
-        for i, act_type in enumerate(suggestions):
-            cls = ACTIVITY_REGISTRY[act_type]
-            with cols[i]:
-                if st.button(f"**{cls.name}**\n\n{cls.description}", key=f"act_{i}",
-                             width="stretch"):
-                    chosen = act_type
+    if chosen:
+        try:
+            due_cards = db.get_due_cards(conn)
+            recent_errors = db.get_recent_errors(conn, limit=5)
+            st.session_state.session_id = db.create_session(conn, activity_type=chosen)
+            st.session_state.activity_type = chosen
+            st.session_state.activity_data = {}
+            st.session_state.pending_reviews = {}
+            st.session_state.pending_new_words = []
 
-        if chosen:
-            try:
-                due_cards = db.get_due_cards(conn)
-                recent_errors = db.get_recent_errors(conn, limit=5)
-                st.session_state.session_id = db.create_session(conn, activity_type=chosen)
+            with st.spinner("Connecting to LLM..."):
+                llm.warmup()
 
-                with st.spinner("Connecting to LLM..."):
-                    model = llm.warmup()
+            tutor = llm.TutorLLM(due_cards=due_cards, recent_errors=recent_errors)
+            st.session_state.tutor = tutor
 
-                tutor = llm.TutorLLM(due_cards=due_cards, recent_errors=recent_errors)
-
+            # Activity-specific initialization
+            if chosen == "free_conversation":
                 with st.spinner("Preparing session..."):
                     opening = tutor.generate_opening()
-
-                # TTS for opening message
-                opening_audio = None
-                if st.session_state.tts_enabled and opening.message:
-                    try:
-                        opening_audio = st.session_state.tts_provider.synthesize(opening.message)
-                    except Exception:
-                        pass
-
-                st.session_state.tutor = tutor
                 st.session_state.messages = [
-                    {"role": "assistant", "content": opening.message, "audio": opening_audio, "corrections": []}
+                    {"role": "assistant", "content": opening.message,
+                     "audio": _speak(opening.message), "corrections": []}
                 ]
-                st.rerun()
-            except Exception as e:
-                st.error(f"Failed to start session: {e}")
-        return
+                st.session_state.activity_phase = "chatting"
 
-    # Chat interface — display history
+            elif chosen == "vocabulary_drill":
+                cards = db.get_due_cards(conn, limit=10)
+                if not cards:
+                    st.info("No cards due for review! Try Free Conversation instead.")
+                    return
+                st.session_state.activity_data = {
+                    "cards": cards, "current_index": 0, "reviewed": 0
+                }
+                st.session_state.activity_phase = "card_shown"
+
+            elif chosen == "writing_prompt":
+                with st.spinner("Creating writing exercise..."):
+                    prompt_response = tutor.chat(
+                        "Generate a writing exercise for a C1 English learner. "
+                        "Choose one: formal email, short opinion essay (150-200 words), "
+                        "summary, letter, or report. State the task clearly in 2-3 sentences. "
+                        "Include specific requirements (word count, tone, format). "
+                        "Do NOT call any tools."
+                    )
+                st.session_state.activity_data = {"prompt": prompt_response.message}
+                st.session_state.activity_phase = "prompt_given"
+
+            elif chosen == "article_summary":
+                with st.spinner("Finding an interesting article..."):
+                    article = fetch_article(topic="technology")
+                st.session_state.activity_data = {
+                    "article": {
+                        "title": article.title,
+                        "content": article.content,
+                        "source": article.source,
+                        "word_count": article.word_count,
+                    }
+                }
+                st.session_state.activity_phase = "reading"
+
+            elif chosen == "error_correction":
+                with st.spinner("Creating error correction exercise..."):
+                    gen_response = tutor.chat(
+                        "Generate 5 English sentences with deliberate errors for a C1 "
+                        "learner to correct. Each sentence should have exactly ONE error "
+                        "from: grammar, preposition, collocation, article, word order, "
+                        "vocabulary. Format as a numbered list. Do NOT reveal the errors."
+                    )
+                st.session_state.activity_data = {"sentences": gen_response.message}
+                st.session_state.activity_phase = "generated"
+
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to start session: {e}")
+
+
+def _render_free_conversation() -> None:
+    """Free conversation — chat with tutor, TTS, voice input."""
+    # Display history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"], avatar="🗡️" if msg["role"] == "assistant" else "👤"):
             st.markdown(msg["content"])
-
-            # Corrections as styled badges
-            if "corrections" in msg and msg["corrections"]:
+            if msg.get("corrections"):
                 corrections_html = " ".join(
                     f'<span class="correction-badge badge-error">'
-                    f'✗ {c.get("user_said", "")} → {c.get("corrected", "")}'
-                    f'</span>'
+                    f'✗ {c.get("user_said", "")} → {c.get("corrected", "")}</span>'
                     for c in msg["corrections"]
                 )
                 st.markdown(corrections_html, unsafe_allow_html=True)
-
-            # TTS audio player for assistant messages
-            if (msg["role"] == "assistant"
-                    and msg.get("audio")
-                    and msg is st.session_state.messages[-1]):
+            if msg["role"] == "assistant" and msg.get("audio") and msg is st.session_state.messages[-1]:
                 st.audio(msg["audio"], format="audio/mp3", autoplay=True)
 
-    # Process voice input → transcribe → treat as text prompt
-    prompt = None
+    # Input: voice or text
+    prompt = _transcribe_voice()
+    if prompt:
+        st.markdown(f'<div class="transcription-bubble">📝 {prompt}</div>', unsafe_allow_html=True)
 
-    audio_data = st.session_state.get("pending_voice")
-    if audio_data and audio_data.get("bytes"):
-        with st.spinner("Transcribing..."):
-            import io
-            transcribed = ""
-            try:
-                # Use Groq Whisper API — same key, excellent accuracy
-                from openai import OpenAI
-                whisper_client = OpenAI(
-                    api_key=config.GROQ_API_KEY,
-                    base_url="https://api.groq.com/openai/v1",
-                )
-                audio_file = io.BytesIO(audio_data["bytes"])
-                audio_file.name = "recording.wav"
-                result = whisper_client.audio.transcriptions.create(
-                    file=audio_file,
-                    model="whisper-large-v3-turbo",
-                    language="en",
-                )
-                transcribed = result.text.strip()
-            except Exception as e:
-                st.error(f"Transcription error: {e}")
-
-        if transcribed:
-            st.markdown(
-                f'<div class="transcription-bubble">📝 {transcribed}</div>',
-                unsafe_allow_html=True,
-            )
-            prompt = transcribed
-        else:
-            st.warning("Could not understand audio. Try again or type instead.")
-
-    # Text input
     if text_input := st.chat_input("Type in English..."):
         prompt = text_input
 
-    # Process the prompt (from text or voice)
     if prompt:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user", avatar="👤"):
@@ -483,87 +610,314 @@ def render_chat() -> None:
         with st.chat_message("assistant", avatar="🗡️"):
             with st.spinner("Thinking..."):
                 response = st.session_state.tutor.chat(prompt)
-
             st.markdown(response.message)
-
             if response.metadata.corrections:
                 for c in response.metadata.corrections:
                     st.markdown(
                         f'<span class="correction-badge badge-error">'
-                        f'✗ {c.get("user_said", "")} → {c.get("corrected", "")}'
-                        f'</span>',
-                        unsafe_allow_html=True,
-                    )
+                        f'✗ {c.get("user_said", "")} → {c.get("corrected", "")}</span>',
+                        unsafe_allow_html=True)
+            tts_audio = _speak(response.message)
+            if tts_audio:
+                st.audio(tts_audio, format="audio/mp3", autoplay=True)
 
-            # TTS — generate and play tutor audio
-            tts_audio = None
-            if st.session_state.tts_enabled and response.message:
-                try:
-                    tts = st.session_state.tts_provider
-                    tts_audio = tts.synthesize(response.message)
-                    st.audio(tts_audio, format="audio/mp3", autoplay=True)
-                except Exception:
-                    pass
-
-        # Persist corrections and create cards
-        conn = get_conn()
-        if st.session_state.session_id:
-            for c in response.metadata.corrections:
-                corrected_text = c.get("corrected", "")
-                db.create_correction(
-                    conn,
-                    session_id=st.session_state.session_id,
-                    user_said=c.get("user_said", ""),
-                    corrected=corrected_text,
-                    error_type=c.get("error_type"),
-                    explanation=c.get("explanation"),
-                )
-                if corrected_text and not find_card_by_front(conn, corrected_text):
-                    db.create_card(
-                        conn,
-                        front=corrected_text,
-                        card_type="grammar",
-                        back=f'Correct form of: "{c.get("user_said", "")}"',
-                        context=c.get("explanation", ""),
-                    )
-
-            for w in response.metadata.new_word_suggestions:
-                if w.word and not find_card_by_front(conn, w.word):
-                    db.create_card(
-                        conn,
-                        front=w.word,
-                        card_type=w.card_type,
-                        back=w.back,
-                        context=w.context,
-                        tags=w.tags,
-                    )
+        _save_corrections(response.metadata)
+        _accumulate_srs(response.metadata)
 
         st.session_state.messages.append({
-            "role": "assistant",
-            "content": response.message,
-            "corrections": response.metadata.corrections,
-            "audio": tts_audio,
+            "role": "assistant", "content": response.message,
+            "corrections": response.metadata.corrections, "audio": tts_audio,
         })
 
-    # End session
+    _render_end_session_button()
+
+
+def _render_vocabulary_drill() -> None:
+    """Vocabulary drill — show card, user writes sentence, rate quality."""
+    data = st.session_state.activity_data
+    cards = data["cards"]
+    idx = data["current_index"]
+    phase = st.session_state.activity_phase
+
+    if idx >= len(cards):
+        st.success(f"Drill complete! Reviewed {data['reviewed']} card(s).")
+        _render_end_session_button()
+        return
+
+    card = cards[idx]
+    st.markdown(f"### Card {idx + 1}/{len(cards)}")
+    st.markdown(
+        f'**"{card["front"]}"** `{card["type"]}`\n\n'
+        f'Definition: {card.get("back", "N/A")}'
+    )
+
+    if phase == "card_shown":
+        sentence = st.text_input("Use this word in a sentence:", key=f"drill_input_{idx}")
+        if st.button("Submit", key=f"drill_submit_{idx}"):
+            if sentence.strip():
+                with st.spinner("Evaluating..."):
+                    eval_prompt = (
+                        f'The learner was asked to use "{card["front"]}" in a sentence. '
+                        f'Definition: "{card.get("back", "")}". '
+                        f'They wrote: "{sentence}". '
+                        f'Evaluate: correct usage? Grammatically correct? Natural? Be brief.'
+                    )
+                    response = st.session_state.tutor.chat(eval_prompt)
+                st.session_state.activity_data["last_eval"] = response.message
+                _save_corrections(response.metadata)
+                st.session_state.activity_phase = "answered"
+                st.rerun()
+
+    elif phase == "answered":
+        st.markdown(f"**Tutor:** {data.get('last_eval', '')}")
+        st.markdown("**Rate your recall:**")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            if st.button("❌ Again", key=f"rate_again_{idx}", use_container_width=True):
+                _drill_rate_card(card, srs.QUALITY_AGAIN)
+        with col2:
+            if st.button("😓 Hard", key=f"rate_hard_{idx}", use_container_width=True):
+                _drill_rate_card(card, srs.QUALITY_HARD)
+        with col3:
+            if st.button("✅ Good", key=f"rate_good_{idx}", use_container_width=True):
+                _drill_rate_card(card, srs.QUALITY_GOOD)
+        with col4:
+            if st.button("⚡ Easy", key=f"rate_easy_{idx}", use_container_width=True):
+                _drill_rate_card(card, srs.QUALITY_EASY)
+
+
+def _drill_rate_card(card: dict, quality: int) -> None:
+    """Rate a card in vocabulary drill and advance to next."""
+    conn = get_conn()
+    result = srs.review_card(conn, card["id"], quality=quality)
+    st.session_state.activity_data["current_index"] += 1
+    st.session_state.activity_data["reviewed"] += 1
+    st.session_state.activity_phase = "card_shown"
+    st.rerun()
+
+
+def _render_writing_prompt() -> None:
+    """Writing prompt — tutor gives topic, user writes, tutor evaluates."""
+    data = st.session_state.activity_data
+    phase = st.session_state.activity_phase
+
+    if phase == "prompt_given":
+        st.markdown("### Writing Exercise")
+        st.info(data["prompt"])
+        text = st.text_area("Write your response here:", height=200, key="writing_text")
+        if st.button("Submit Writing", key="submit_writing"):
+            if text.strip():
+                with st.spinner("Evaluating your writing..."):
+                    eval_prompt = (
+                        f"The learner wrote this text in response to your prompt. "
+                        f"Evaluate thoroughly — grammar, vocabulary, coherence, "
+                        f"register, structure. List ALL errors.\n\n"
+                        f'Learner\'s text:\n"{text}"'
+                    )
+                    response = st.session_state.tutor.chat(eval_prompt)
+                _save_corrections(response.metadata)
+                _accumulate_srs(response.metadata)
+                data["evaluation"] = response.message
+                data["eval_corrections"] = response.metadata.corrections
+                st.session_state.activity_phase = "evaluated"
+                st.rerun()
+
+    elif phase == "evaluated":
+        st.markdown("### Evaluation")
+        st.markdown(data["evaluation"])
+        if data.get("eval_corrections"):
+            for c in data["eval_corrections"]:
+                st.markdown(
+                    f'<span class="correction-badge badge-error">'
+                    f'✗ {c.get("user_said", "")} → {c.get("corrected", "")}</span>',
+                    unsafe_allow_html=True)
+        tts_audio = _speak(data["evaluation"])
+        if tts_audio:
+            st.audio(tts_audio, format="audio/mp3", autoplay=True)
+        _render_end_session_button()
+
+
+def _render_article_summary() -> None:
+    """Article summary — read real article, write summary, tutor evaluates."""
+    data = st.session_state.activity_data
+    phase = st.session_state.activity_phase
+    article = data["article"]
+
+    # Always show the article
+    st.markdown(f"### 📰 {article['title']}")
+    st.caption(f"{article['source']} · {article['word_count']} words")
+    with st.expander("Read article", expanded=(phase == "reading")):
+        st.markdown(article["content"])
+
+    if phase == "reading":
+        summary = st.text_area(
+            "Write a 3-5 sentence summary:", height=150, key="summary_text"
+        )
+        if st.button("Submit Summary", key="submit_summary"):
+            if summary.strip():
+                with st.spinner("Evaluating your summary..."):
+                    eval_prompt = (
+                        f'The learner read this article:\n'
+                        f'Title: "{article["title"]}"\n'
+                        f'Content: "{article["content"][:500]}"\n\n'
+                        f'They wrote this summary:\n"{summary}"\n\n'
+                        f'Evaluate: (1) Does it capture the main points? '
+                        f'(2) Grammar and vocabulary errors? (3) Improvements.'
+                    )
+                    response = st.session_state.tutor.chat(eval_prompt)
+                _save_corrections(response.metadata)
+                _accumulate_srs(response.metadata)
+                data["evaluation"] = response.message
+                st.session_state.activity_phase = "evaluated"
+                st.rerun()
+
+    elif phase == "evaluated":
+        st.markdown("### Evaluation")
+        st.markdown(data["evaluation"])
+        tts_audio = _speak(data["evaluation"])
+        if tts_audio:
+            st.audio(tts_audio, format="audio/mp3", autoplay=True)
+        _render_end_session_button()
+
+
+def _render_error_correction() -> None:
+    """Error correction — find and fix errors in sentences."""
+    data = st.session_state.activity_data
+    phase = st.session_state.activity_phase
+
+    if phase == "generated":
+        st.markdown("### Find and Fix the Errors")
+        st.markdown(data["sentences"])
+        st.markdown("---")
+        st.markdown("Type the corrected version of each sentence:")
+        corrections = []
+        for i in range(1, 6):
+            c = st.text_input(f"Sentence {i}:", key=f"err_corr_{i}")
+            corrections.append(c)
+        if st.button("Submit Corrections", key="submit_corrections"):
+            corrections_text = "\n".join(
+                f"{i+1}. {c}" for i, c in enumerate(corrections) if c.strip()
+            )
+            if corrections_text:
+                with st.spinner("Checking your corrections..."):
+                    eval_prompt = (
+                        f"The learner was asked to correct errors in these sentences:\n\n"
+                        f"Original sentences:\n{data['sentences']}\n\n"
+                        f"Learner's corrections:\n{corrections_text}\n\n"
+                        f"For each: did they find the error? Is the correction right? "
+                        f"Explain what the actual error was if they missed it."
+                    )
+                    response = st.session_state.tutor.chat(eval_prompt)
+                _save_corrections(response.metadata)
+                _accumulate_srs(response.metadata)
+                data["evaluation"] = response.message
+                st.session_state.activity_phase = "evaluated"
+                st.rerun()
+
+    elif phase == "evaluated":
+        st.markdown("### Results")
+        st.markdown(data["evaluation"])
+        tts_audio = _speak(data["evaluation"])
+        if tts_audio:
+            st.audio(tts_audio, format="audio/mp3", autoplay=True)
+        _render_end_session_button()
+
+
+def _render_session_review() -> None:
+    """Final SRS review — confirm card ratings and accept new words."""
+    st.markdown("### 📋 Session Review")
+    st.markdown("Confirm card ratings before saving:")
+    conn = get_conn()
+
+    # Card ratings
+    reviews = st.session_state.pending_reviews
+    if reviews:
+        for card_id, review in list(reviews.items()):
+            suggested = QUALITY_MAP_NAMES.get(review["quality"], "good")
+            st.markdown(f'**"{review["front"]}"** — suggested: `{suggested}`')
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                if st.button("❌ Again", key=f"rev_again_{card_id}"):
+                    srs.review_card(conn, card_id, srs.QUALITY_AGAIN)
+                    del reviews[card_id]
+                    st.rerun()
+            with col2:
+                if st.button("😓 Hard", key=f"rev_hard_{card_id}"):
+                    srs.review_card(conn, card_id, srs.QUALITY_HARD)
+                    del reviews[card_id]
+                    st.rerun()
+            with col3:
+                if st.button("✅ Good", key=f"rev_good_{card_id}"):
+                    srs.review_card(conn, card_id, srs.QUALITY_GOOD)
+                    del reviews[card_id]
+                    st.rerun()
+            with col4:
+                if st.button("⚡ Easy", key=f"rev_easy_{card_id}"):
+                    srs.review_card(conn, card_id, srs.QUALITY_EASY)
+                    del reviews[card_id]
+                    st.rerun()
+
+    # New words
+    new_words = st.session_state.pending_new_words
+    if new_words:
+        st.markdown("### New Vocabulary")
+        for i, w in enumerate(list(new_words)):
+            st.markdown(f'**"{w.word}"** — {w.back}')
+            col_y, col_n = st.columns(2)
+            with col_y:
+                if st.button("✅ Add", key=f"nw_add_{i}"):
+                    db.create_card(conn, front=w.word, card_type=w.card_type,
+                                   back=w.back, context=w.context, tags=w.tags)
+                    new_words.remove(w)
+                    st.rerun()
+            with col_n:
+                if st.button("❌ Skip", key=f"nw_skip_{i}"):
+                    new_words.remove(w)
+                    st.rerun()
+
+    # Done reviewing
+    if not reviews and not new_words:
+        st.success("Review complete!")
+
+    if st.button("✅ Finish Session", key="finish_review"):
+        # Apply any remaining reviews with suggested quality
+        for card_id, review in reviews.items():
+            srs.review_card(conn, card_id, review["quality"])
+        _reset_session()
+        st.rerun()
+
+
+def _render_end_session_button() -> None:
+    """Show the end session button that triggers final review."""
     st.divider()
-    with st.container():
-        st.markdown('<div class="end-session-btn">', unsafe_allow_html=True)
-        end_clicked = st.button("🛑 End Session", type="secondary")
-        st.markdown('</div>', unsafe_allow_html=True)
-    if end_clicked:
+    st.markdown('<div class="end-session-btn">', unsafe_allow_html=True)
+    if st.button("🛑 End Session", type="secondary", key="end_session"):
         conn = get_conn()
         if st.session_state.session_id:
-            db.end_session(
-                conn, st.session_state.session_id,
-                total_turns=len([m for m in st.session_state.messages if m["role"] == "user"]),
-                errors_found=sum(len(m.get("corrections", [])) for m in st.session_state.messages),
-                cards_reviewed=0,
-            )
-        st.session_state.tutor = None
-        st.session_state.messages = []
-        st.session_state.session_id = None
+            turns = len([m for m in st.session_state.messages if m["role"] == "user"])
+            errors = sum(len(m.get("corrections", [])) for m in st.session_state.messages)
+            reviewed = len(st.session_state.pending_reviews)
+            db.end_session(conn, st.session_state.session_id,
+                           total_turns=turns, errors_found=errors, cards_reviewed=reviewed)
+
+        if st.session_state.pending_reviews or st.session_state.pending_new_words:
+            st.session_state.activity_phase = "session_review"
+        else:
+            _reset_session()
         st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+def _reset_session() -> None:
+    """Reset all session state for a new session."""
+    st.session_state.tutor = None
+    st.session_state.messages = []
+    st.session_state.session_id = None
+    st.session_state.activity_type = None
+    st.session_state.activity_phase = None
+    st.session_state.activity_data = {}
+    st.session_state.pending_reviews = {}
+    st.session_state.pending_new_words = []
 
 
 # ---------------------------------------------------------------------------
