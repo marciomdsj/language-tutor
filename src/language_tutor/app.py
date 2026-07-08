@@ -1058,16 +1058,76 @@ def render_analytics() -> None:
 # Cards page
 # ---------------------------------------------------------------------------
 def render_cards() -> None:
-    """Render the card deck management page."""
+    """Render the card deck management page with inline SRS review."""
     st.markdown("# 🃏 CARD DECK")
     conn = get_conn()
 
-    tab1, tab2 = st.tabs(["📋 All Cards", "⏰ Due Now"])
+    tab1, tab2 = st.tabs(["⏰ Due Now", "📋 All Cards"])
 
     with tab1:
+        due = db.get_due_cards(conn, limit=20)
+        if not due:
+            st.success("All caught up! No cards due for review.")
+        else:
+            st.markdown(f"**{len(due)} card(s) due for review**")
+            st.caption("Rate each card to update its SRS schedule")
+
+            for card in due:
+                card_id = card["id"]
+                front = card["front"]
+                back = card.get("back", "")
+                status = card["status"]
+                seen = card["times_seen"]
+                correct = card["times_correct"]
+                accuracy = f"{correct}/{seen}" if seen > 0 else "new"
+
+                status_icons = {
+                    "new": "🟢", "learning": "🟡", "review": "🔵",
+                    "relearning": "🟠",
+                }
+                icon = status_icons.get(status, "⚪")
+
+                with st.container():
+                    st.markdown(
+                        f'{icon} **"{front}"** `{card["type"]}` · '
+                        f'{status} · {accuracy}'
+                    )
+                    if back:
+                        st.caption(f"Definition: {back}")
+
+                    col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 2])
+                    with col1:
+                        if st.button("❌ Again", key=f"due_again_{card_id}",
+                                     use_container_width=True):
+                            result = srs.review_card(conn, card_id, srs.QUALITY_AGAIN)
+                            st.rerun()
+                    with col2:
+                        if st.button("😓 Hard", key=f"due_hard_{card_id}",
+                                     use_container_width=True):
+                            result = srs.review_card(conn, card_id, srs.QUALITY_HARD)
+                            st.rerun()
+                    with col3:
+                        if st.button("✅ Good", key=f"due_good_{card_id}",
+                                     use_container_width=True):
+                            result = srs.review_card(conn, card_id, srs.QUALITY_GOOD)
+                            st.rerun()
+                    with col4:
+                        if st.button("⚡ Easy", key=f"due_easy_{card_id}",
+                                     use_container_width=True):
+                            result = srs.review_card(conn, card_id, srs.QUALITY_EASY)
+                            st.rerun()
+                    with col5:
+                        if st.button("⏸️ Suspend", key=f"due_suspend_{card_id}",
+                                     use_container_width=True):
+                            db.suspend_card(conn, card_id)
+                            st.rerun()
+
+                    st.divider()
+
+    with tab2:
         rows = conn.execute(
-            "SELECT front, back, type, status, times_seen, times_correct, "
-            "ease_factor, interval FROM cards ORDER BY updated_at DESC"
+            "SELECT id, front, back, type, status, times_seen, times_correct, "
+            "ease_factor, interval, next_review FROM cards ORDER BY updated_at DESC"
         ).fetchall()
 
         if not rows:
@@ -1076,16 +1136,17 @@ def render_cards() -> None:
 
         for row in rows:
             row = dict(row)
+            card_id = row["id"]
             accuracy = (
                 f"{row['times_correct']}/{row['times_seen']}"
                 if row["times_seen"] > 0
                 else "new"
             )
-            status_colors = {
+            status_icons = {
                 "new": "🟢", "learning": "🟡", "review": "🔵",
                 "relearning": "🟠", "suspended": "🔴",
             }
-            icon = status_colors.get(row["status"], "⚪")
+            icon = status_icons.get(row["status"], "⚪")
 
             with st.expander(
                 f'{icon} **{row["front"]}** — {row["status"]} · {accuracy}'
@@ -1095,17 +1156,16 @@ def render_cards() -> None:
                 col1.markdown(f"**Definition:** {row['back'] or 'N/A'}")
                 col2.markdown(f"**Ease:** {row['ease_factor']:.2f}")
                 col2.markdown(f"**Interval:** {row['interval']:.1f} days")
+                col2.markdown(f"**Next review:** {(row.get('next_review') or '')[:10]}")
 
-    with tab2:
-        due = db.get_due_cards(conn)
-        if not due:
-            st.success("All caught up! No cards due for review.")
-        else:
-            st.markdown(f"**{len(due)} card(s) due**")
-            for card in due:
-                st.markdown(
-                    f'- `{card["front"]}` ({card["type"]}, {card["status"]})'
-                )
+                if row["status"] == "suspended":
+                    if st.button("▶️ Unsuspend", key=f"unsuspend_{card_id}"):
+                        db.unsuspend_card(conn, card_id)
+                        st.rerun()
+                else:
+                    if st.button("⏸️ Suspend", key=f"suspend_{card_id}"):
+                        db.suspend_card(conn, card_id)
+                        st.rerun()
 
 
 # ---------------------------------------------------------------------------
