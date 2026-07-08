@@ -616,9 +616,6 @@ def _render_free_conversation() -> None:
                     for c in msg["corrections"]
                 )
                 st.markdown(corrections_html, unsafe_allow_html=True)
-            if msg["role"] == "assistant" and msg.get("audio") and msg is st.session_state.messages[-1]:
-                msg_idx = st.session_state.messages.index(msg)
-                st.audio(msg["audio"], format="audio/mp3", autoplay=True, key=f"tts_hist_{msg_idx}")
 
     # Input: voice or text
     prompt = _transcribe_voice()
@@ -649,8 +646,7 @@ def _render_free_conversation() -> None:
                         unsafe_allow_html=True)
             tts_audio = _speak(response.message)
             if tts_audio:
-                turn_count = len([m for m in st.session_state.messages if m["role"] == "user"])
-                st.audio(tts_audio, format="audio/mp3", autoplay=True, key=f"tts_new_{turn_count}")
+                st.audio(tts_audio, format="audio/mp3", autoplay=True)
 
         _save_corrections(response.metadata)
         _accumulate_srs(response.metadata)
@@ -764,7 +760,7 @@ def _render_writing_prompt() -> None:
                     unsafe_allow_html=True)
         tts_audio = _speak(data["evaluation"])
         if tts_audio:
-            st.audio(tts_audio, format="audio/mp3", autoplay=True, key="tts_writing_eval")
+            st.audio(tts_audio, format="audio/mp3", autoplay=True)
         _render_end_session_button()
 
 
@@ -807,7 +803,7 @@ def _render_article_summary() -> None:
         st.markdown(data["evaluation"])
         tts_audio = _speak(data["evaluation"])
         if tts_audio:
-            st.audio(tts_audio, format="audio/mp3", autoplay=True, key="tts_article_eval")
+            st.audio(tts_audio, format="audio/mp3", autoplay=True)
         _render_end_session_button()
 
 
@@ -850,7 +846,7 @@ def _render_error_correction() -> None:
         st.markdown(data["evaluation"])
         tts_audio = _speak(data["evaluation"])
         if tts_audio:
-            st.audio(tts_audio, format="audio/mp3", autoplay=True, key="tts_error_eval")
+            st.audio(tts_audio, format="audio/mp3", autoplay=True)
         _render_end_session_button()
 
 
