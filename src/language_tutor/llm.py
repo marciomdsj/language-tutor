@@ -614,32 +614,24 @@ class TutorLLM:
         return TutorResponse(message=reply_text, metadata=metadata)
 
     def _conversation_pass(self) -> dict:
-        """Pass 1: natural conversation with card assessments and new words.
+        """Pass 1: natural conversation — NO tools.
+
+        The conversation pass focuses purely on generating a natural response.
+        Tools were causing the model to return empty text (it put everything
+        into tool calls instead of responding). Corrections are handled
+        by the separate error check pass.
 
         Returns:
             Dict with 'reply' (str) and 'metadata' (TurnMetadata).
         """
-        response = _call_llm(
-            messages=self.history,
-            tools=[METADATA_TOOL],
-        )
+        response = _call_llm(messages=self.history)
 
-        reply_text = _get_content(response)
-        metadata = self._extract_metadata(response)
+        reply_text = _strip_tool_artifacts(_get_content(response))
 
-        # Some models leak tool call JSON into content text — clean it
-        reply_text = _strip_tool_artifacts(reply_text)
-
-        # If model returned only tool calls with no visible text, retry without tools
         if not reply_text.strip():
-            retry = _call_llm(messages=self.history)
-            reply_text = _strip_tool_artifacts(_get_content(retry))
+            reply_text = "Could you tell me more about that?"
 
-        # Last resort — never return empty
-        if not reply_text.strip():
-            reply_text = "Could you elaborate on that? I'd like to hear more."
-
-        return {"reply": reply_text, "metadata": metadata}
+        return {"reply": reply_text, "metadata": TurnMetadata()}
 
     def _error_check_pass(self, user_message: str) -> list[dict[str, str]]:
         """Pass 2: focused error detection with minimal schema.
