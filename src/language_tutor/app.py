@@ -251,6 +251,16 @@ st.markdown("""
         background-color: #ff6b6b !important;
         color: #0a0a0f !important;
     }
+
+    /* Sticky voice controls bar */
+    .sticky-voice-bar {
+        position: sticky;
+        top: 0;
+        z-index: 999;
+        background: #0a0a0f;
+        padding: 8px 0 4px 0;
+        border-bottom: 1px solid #1a1a2e;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -385,7 +395,8 @@ def render_chat() -> None:
             st.rerun()
         return
 
-    # Voice controls — compact bar
+    # Voice controls — sticky bar (stays visible while scrolling)
+    st.markdown('<div class="sticky-voice-bar">', unsafe_allow_html=True)
     voice_col1, voice_col2, voice_col3 = st.columns([2, 3, 7])
     with voice_col1:
         st.session_state.tts_enabled = st.toggle(
@@ -406,6 +417,7 @@ def render_chat() -> None:
             'Toggle voice for tutor audio · Click Speak to record</span>',
             unsafe_allow_html=True,
         )
+    st.markdown('</div>', unsafe_allow_html=True)
 
     st.divider()
 
@@ -623,12 +635,10 @@ def render_analytics() -> None:
                 text=counts, textposition="outside",
                 textfont=dict(family="JetBrains Mono", color="#e0e0e0"),
             )])
-            fig.update_layout(
-                title="Errors by Type",
-                **PLOTLY_LAYOUT,
-                yaxis=dict(gridcolor="#1a1a2e", autorange="reversed"),
-                xaxis=dict(gridcolor="#1a1a2e", title="Count"),
-            )
+            layout = {**PLOTLY_LAYOUT}
+            layout["yaxis"] = dict(gridcolor="#1a1a2e", autorange="reversed")
+            layout["xaxis"] = dict(gridcolor="#1a1a2e", title="Count")
+            fig.update_layout(title="Errors by Type", **layout)
             st.plotly_chart(fig, width="stretch")
 
         if metrics.top_errors:
