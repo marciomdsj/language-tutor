@@ -376,17 +376,39 @@ def _get_content(response: object) -> str:
 def build_system_prompt(
     due_cards: list[db.Row],
     recent_errors: list[dict] | None = None,
+    user_context: dict | None = None,
 ) -> str:
     """Build the dynamic system prompt with learner profile and SRS context.
 
     Args:
         due_cards: Cards that are due for review right now.
         recent_errors: Recent corrections from past sessions.
+        user_context: User profile dict (name, profession, interests, etc.).
 
     Returns:
         The complete system prompt string.
     """
     recent_errors = recent_errors or []
+    user_context = user_context or {}
+
+    # User profile section
+    profile_section = ""
+    if user_context:
+        parts = []
+        if user_context.get("name"):
+            parts.append(f"- Name: {user_context['name']}")
+        if user_context.get("profession"):
+            parts.append(f"- Profession: {user_context['profession']}")
+        if user_context.get("interests"):
+            parts.append(f"- Interests: {', '.join(user_context['interests'])}")
+        if parts:
+            profile_section = (
+                "\n\nLEARNER PROFILE:\n"
+                + "\n".join(parts)
+                + "\nPersonalize topics, examples, and vocabulary based on this profile. "
+                "Use their professional domain and interests to make conversations relevant."
+            )
+
     cards_section = ""
     if due_cards:
         lines = []
@@ -431,7 +453,7 @@ YOUR ROLE:
 - Keep responses concise (2-4 sentences) to maintain conversational rhythm.
 - ALWAYS call the report_metadata tool after your response.
 - Report ALL errors via the tool, even minor ones. Never skip the tool call.
-{cards_section}{recent_errors_section}"""
+{profile_section}{cards_section}{recent_errors_section}"""
 
 
 # ---------------------------------------------------------------------------
@@ -487,9 +509,13 @@ class TutorLLM:
         self,
         due_cards: list[db.Row] | None = None,
         recent_errors: list[dict] | None = None,
+        user_context: dict | None = None,
     ) -> None:
         self.due_cards = due_cards or []
-        self.system_prompt = build_system_prompt(self.due_cards, recent_errors)
+        self.user_context = user_context or {}
+        self.system_prompt = build_system_prompt(
+            self.due_cards, recent_errors, self.user_context
+        )
         self.history: list[dict[str, str]] = [
             {"role": "system", "content": self.system_prompt}
         ]
@@ -497,27 +523,36 @@ class TutorLLM:
     def generate_opening(self) -> TutorResponse:
         """Generate the tutor's opening message to start the session.
 
-        The tutor speaks first — greeting the learner, suggesting a topic
-        or activity based on due cards and recent errors.
+        Uses the learner's profile to pick relevant topics instead of
+        always defaulting to travel/generic themes.
 
         Returns:
             TutorResponse with the opening message.
         """
+        interests = self.user_context.get("interests", [])
+        interests_hint = ""
+        if interests:
+            interests_hint = (
+                f"Pick a topic related to one of the learner's interests: "
+                f"{', '.join(interests)}. VARY the topic from previous sessions. "
+            )
+
         if self.due_cards:
             card_list = ", ".join(f'"{c["front"]}"' for c in self.due_cards[:3])
             opening_prompt = (
                 f"Start the session. Greet the learner briefly and propose an "
-                f"engaging conversation topic or activity. You have these review "
-                f"cards to work into the conversation: {card_list}. "
-                f"Ask an opening question that naturally leads toward using them. "
-                f"Keep it to 2-3 sentences. Do NOT call any tools or output JSON."
+                f"engaging conversation topic. {interests_hint}"
+                f"You have these review cards to work into the conversation: "
+                f"{card_list}. Ask an opening question that naturally leads "
+                f"toward using them. Keep it to 2-3 sentences. "
+                f"Do NOT call any tools or output JSON."
             )
         else:
             opening_prompt = (
-                "Start the session. Greet the learner briefly and propose an "
-                "engaging conversation topic or short activity appropriate for "
-                "a C1 English learner. Ask an opening question. "
-                "Keep it to 2-3 sentences. Do NOT call any tools or output JSON."
+                f"Start the session. Greet the learner briefly and propose an "
+                f"engaging conversation topic. {interests_hint}"
+                f"Ask an opening question appropriate for a C1 English learner. "
+                f"Keep it to 2-3 sentences. Do NOT call any tools or output JSON."
             )
 
         self.history.append({"role": "user", "content": opening_prompt})

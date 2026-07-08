@@ -283,6 +283,27 @@ def get_conn() -> sqlite3.Connection:
     return db.get_connection()
 
 
+DEFAULT_PROFILE = {
+    "name": "",
+    "profession": "",
+    "interests": ["technology", "science", "travel"],
+    "preferred_topics": [],
+}
+
+
+def load_profile() -> dict:
+    """Load user profile from JSON file, or return defaults."""
+    if config.USER_PROFILE_PATH.exists():
+        return json.loads(config.USER_PROFILE_PATH.read_text())
+    return DEFAULT_PROFILE.copy()
+
+
+def save_profile(profile: dict) -> None:
+    """Save user profile to JSON file."""
+    config.USER_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    config.USER_PROFILE_PATH.write_text(json.dumps(profile, indent=2))
+
+
 def init_state() -> None:
     """Initialize Streamlit session state."""
     if "messages" not in st.session_state:
@@ -514,7 +535,11 @@ def _render_activity_selection() -> None:
             with st.spinner("Connecting to LLM..."):
                 llm.warmup()
 
-            tutor = llm.TutorLLM(due_cards=due_cards, recent_errors=recent_errors)
+            profile = load_profile()
+            tutor = llm.TutorLLM(
+                due_cards=due_cards, recent_errors=recent_errors,
+                user_context=profile,
+            )
             st.session_state.tutor = tutor
 
             # Activity-specific initialization
@@ -1087,29 +1112,69 @@ def render_cards() -> None:
 # Settings page
 # ---------------------------------------------------------------------------
 def render_settings() -> None:
-    """Render the settings page."""
+    """Render the settings page with editable user profile."""
     st.markdown("# ⚙️ SETTINGS")
 
-    st.markdown("### LLM Provider Cascade")
+    # User profile
+    st.markdown("### 👤 Learner Profile")
+    st.caption("Personalize topics and conversation style")
+
+    profile = load_profile()
+
+    name = st.text_input("Name", value=profile.get("name", ""), key="prof_name")
+    profession = st.text_input(
+        "Profession", value=profile.get("profession", ""),
+        placeholder="e.g. AI Engineer, Data Scientist, Student",
+        key="prof_profession",
+    )
+    interests = st.multiselect(
+        "Interests (used to vary conversation topics)",
+        options=[
+            "technology", "artificial intelligence", "science",
+            "gaming", "travel", "business", "sports", "music",
+            "movies", "cooking", "health", "environment",
+            "politics", "history", "philosophy", "literature",
+        ],
+        default=profile.get("interests", ["technology"]),
+        key="prof_interests",
+    )
+    custom_topics = st.text_input(
+        "Custom topics (comma-separated)",
+        value=", ".join(profile.get("preferred_topics", [])),
+        placeholder="e.g. software architecture, game design, Japanese culture",
+        key="prof_topics",
+    )
+
+    if st.button("💾 Save Profile", key="save_profile"):
+        new_profile = {
+            "name": name,
+            "profession": profession,
+            "interests": interests,
+            "preferred_topics": [t.strip() for t in custom_topics.split(",") if t.strip()],
+        }
+        save_profile(new_profile)
+        st.success("Profile saved! Topics will update in your next session.")
+
+    st.divider()
+
+    st.markdown("### LLM Provider")
     for i, model in enumerate(config.LLM_MODELS):
         priority = ["🥇 Primary", "🥈 Fallback", "🥉 Offline"][min(i, 2)]
         st.markdown(f"{priority}: `{model}`")
 
     st.divider()
 
-    st.markdown("### Current Configuration")
+    st.markdown("### System")
     st.markdown(f"- **Level:** {config.LEARNER_LEVEL}")
-    st.markdown(f"- **Target Language:** {config.TARGET_LANGUAGE}")
-    st.markdown(f"- **TTS Provider:** {config.TTS_PROVIDER}")
-    st.markdown(f"- **STT Provider:** {config.STT_PROVIDER}")
-    st.markdown(f"- **Session Duration:** {config.SESSION_DURATION_MINUTES} min")
+    st.markdown(f"- **Language:** {config.TARGET_LANGUAGE}")
+    st.markdown(f"- **TTS:** {config.TTS_PROVIDER}")
 
     st.divider()
     st.markdown(
         "### About\n"
         "**Language Tutor** — LLM conversation + spaced repetition (SRS)\n\n"
-        "Built with Qwen3/Llama via Groq, SM-2 algorithm, "
-        "edge-tts, Vosk, and Streamlit."
+        "Built with Llama via Groq, SM-2 algorithm, "
+        "edge-tts, Whisper, and Streamlit."
     )
 
 

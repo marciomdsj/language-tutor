@@ -58,6 +58,7 @@ PRIMARY_MODEL: str = LLM_MODELS[0]
 # ---------------------------------------------------------------------------
 TARGET_LANGUAGE: str = "en"
 LEARNER_LEVEL: str = "C1"
+USER_PROFILE_PATH: Path = DATA_DIR / "user_profile.json"
 
 # ---------------------------------------------------------------------------
 # Session defaults
