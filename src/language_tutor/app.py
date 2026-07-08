@@ -435,76 +435,25 @@ def render_chat() -> None:
 
     if audio_data and audio_data.get("bytes"):
         with st.spinner("Transcribing..."):
-            from language_tutor.stt import get_stt_provider
-            stt = get_stt_provider()
-
-            # Browser records WAV at 44.1/48kHz — Vosk needs 16kHz mono int16.
-            # Resample using numpy.
             import io
-            import wave
-            import numpy as np
-            from language_tutor.audio import SAMPLE_RATE
-
             transcribed = ""
             try:
-                raw_bytes = audio_data["bytes"]
-
-                # Detect format: mic_recorder may return WAV or raw WebM/OGG
-                is_wav = raw_bytes[:4] == b"RIFF"
-
-                if is_wav:
-                    wav_io = io.BytesIO(raw_bytes)
-                    with wave.open(wav_io) as wf:
-                        orig_rate = wf.getframerate()
-                        n_channels = wf.getnchannels()
-                        sample_width = wf.getsampwidth()
-                        raw = wf.readframes(wf.getnframes())
-
-                    # Handle different sample widths
-                    if sample_width == 2:
-                        samples = np.frombuffer(raw, dtype=np.int16)
-                    elif sample_width == 4:
-                        # 32-bit float WAV — common from browser
-                        samples_f = np.frombuffer(raw, dtype=np.float32)
-                        samples = (samples_f * 32767).clip(-32768, 32767).astype(np.int16)
-                    else:
-                        samples = np.frombuffer(raw, dtype=np.int16)
-
-                    # Stereo → mono
-                    if n_channels > 1:
-                        samples = samples.reshape(-1, n_channels)[:, 0].astype(np.int16)
-
-                    # Resample to 16kHz
-                    if orig_rate != SAMPLE_RATE:
-                        duration = len(samples) / orig_rate
-                        new_length = int(duration * SAMPLE_RATE)
-                        if new_length > 0:
-                            indices = np.linspace(0, len(samples) - 1, new_length).astype(int)
-                            samples = samples[indices]
-
-                    pcm_bytes = samples.astype(np.int16).tobytes()
-                else:
-                    # Not WAV — try using soundfile which handles more formats
-                    import soundfile as sf
-                    audio_io = io.BytesIO(raw_bytes)
-                    data, orig_rate = sf.read(audio_io)
-                    # Convert to mono int16 at 16kHz
-                    if data.ndim > 1:
-                        data = data[:, 0]
-                    if orig_rate != SAMPLE_RATE:
-                        duration = len(data) / orig_rate
-                        new_length = int(duration * SAMPLE_RATE)
-                        if new_length > 0:
-                            indices = np.linspace(0, len(data) - 1, new_length).astype(int)
-                            data = data[indices]
-                    samples = (data * 32767).clip(-32768, 32767).astype(np.int16)
-                    pcm_bytes = samples.tobytes()
-
-                if len(pcm_bytes) > 0:
-                    transcribed = stt.transcribe(pcm_bytes)
-
+                # Use Groq Whisper API — same key, excellent accuracy
+                from openai import OpenAI
+                whisper_client = OpenAI(
+                    api_key=config.GROQ_API_KEY,
+                    base_url="https://api.groq.com/openai/v1",
+                )
+                audio_file = io.BytesIO(audio_data["bytes"])
+                audio_file.name = "recording.wav"
+                result = whisper_client.audio.transcriptions.create(
+                    file=audio_file,
+                    model="whisper-large-v3-turbo",
+                    language="en",
+                )
+                transcribed = result.text.strip()
             except Exception as e:
-                st.error(f"Audio processing error: {e}")
+                st.error(f"Transcription error: {e}")
 
         if transcribed:
             st.markdown(
