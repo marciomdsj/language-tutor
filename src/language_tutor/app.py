@@ -252,15 +252,6 @@ st.markdown("""
         color: #0a0a0f !important;
     }
 
-    /* Sticky voice controls bar */
-    .sticky-voice-bar {
-        position: sticky;
-        top: 0;
-        z-index: 999;
-        background: #0a0a0f;
-        padding: 8px 0 4px 0;
-        border-bottom: 1px solid #1a1a2e;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -335,6 +326,24 @@ def render_sidebar() -> str:
 
         st.divider()
 
+        # Voice controls — always visible in sidebar
+        st.markdown("### 🎙️ Voice")
+        st.session_state.tts_enabled = st.toggle(
+            "🔊 Tutor speaks", value=st.session_state.tts_enabled
+        )
+        audio_data = mic_recorder(
+            start_prompt="🎤 Speak",
+            stop_prompt="⏹️ Done",
+            just_once=True,
+            format="wav",
+            use_container_width=True,
+            key="sidebar_mic",
+        )
+        # Store voice data for the chat page to process
+        st.session_state.pending_voice = audio_data
+
+        st.divider()
+
         # Quick stats
         conn = get_conn()
         card_stats = db.get_card_stats(conn)
@@ -375,51 +384,35 @@ def render_chat() -> None:
                     chosen = act_type
 
         if chosen:
-            due_cards = db.get_due_cards(conn)
-            recent_errors = db.get_recent_errors(conn, limit=5)
-            st.session_state.session_id = db.create_session(conn, activity_type=chosen)
+            try:
+                due_cards = db.get_due_cards(conn)
+                recent_errors = db.get_recent_errors(conn, limit=5)
+                st.session_state.session_id = db.create_session(conn, activity_type=chosen)
 
-            with st.spinner("Connecting to LLM..."):
-                llm.warmup()
+                with st.spinner("Connecting to LLM..."):
+                    model = llm.warmup()
 
-            tutor = llm.TutorLLM(due_cards=due_cards, recent_errors=recent_errors)
+                tutor = llm.TutorLLM(due_cards=due_cards, recent_errors=recent_errors)
 
-            # Generate opening
-            with st.spinner("Preparing session..."):
-                opening = tutor.generate_opening()
+                with st.spinner("Preparing session..."):
+                    opening = tutor.generate_opening()
 
-            st.session_state.tutor = tutor
-            st.session_state.messages = [
-                {"role": "assistant", "content": opening.message}
-            ]
-            st.rerun()
+                # TTS for opening message
+                opening_audio = None
+                if st.session_state.tts_enabled and opening.message:
+                    try:
+                        opening_audio = st.session_state.tts_provider.synthesize(opening.message)
+                    except Exception:
+                        pass
+
+                st.session_state.tutor = tutor
+                st.session_state.messages = [
+                    {"role": "assistant", "content": opening.message, "audio": opening_audio, "corrections": []}
+                ]
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to start session: {e}")
         return
-
-    # Voice controls — sticky bar (stays visible while scrolling)
-    st.markdown('<div class="sticky-voice-bar">', unsafe_allow_html=True)
-    voice_col1, voice_col2, voice_col3 = st.columns([2, 3, 7])
-    with voice_col1:
-        st.session_state.tts_enabled = st.toggle(
-            "🔊 Voice", value=st.session_state.tts_enabled
-        )
-    with voice_col2:
-        audio_data = mic_recorder(
-            start_prompt="🎤 Speak",
-            stop_prompt="⏹️ Done",
-            just_once=True,
-            use_container_width=True,
-            format="wav",
-            key="mic_recorder",
-        )
-    with voice_col3:
-        st.markdown(
-            '<span style="color:#555;font-size:0.75rem">'
-            'Toggle voice for tutor audio · Click Speak to record</span>',
-            unsafe_allow_html=True,
-        )
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    st.divider()
 
     # Chat interface — display history
     for msg in st.session_state.messages:
@@ -445,6 +438,7 @@ def render_chat() -> None:
     # Process voice input → transcribe → treat as text prompt
     prompt = None
 
+    audio_data = st.session_state.get("pending_voice")
     if audio_data and audio_data.get("bytes"):
         with st.spinner("Transcribing..."):
             import io
