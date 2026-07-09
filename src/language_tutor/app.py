@@ -349,6 +349,44 @@ def _quality_from_suggestion(suggestion: str) -> int:
     )
 
 
+def _render_practice_suggestions(data: dict) -> None:
+    """Show a box with words/phrases the learner should practice using.
+
+    Extracts corrected forms from the evaluation's corrections and
+    displays them as practice suggestions for the follow-up discussion.
+    """
+    conn = get_conn()
+    suggestions = []
+
+    # Get corrections from the current session
+    session_id = st.session_state.session_id
+    if session_id:
+        recent = conn.execute(
+            """SELECT corrected, error_type FROM corrections
+               WHERE session_id = ?
+               ORDER BY created_at DESC LIMIT 8""",
+            (session_id,),
+        ).fetchall()
+        suggestions = [
+            {"word": r["corrected"], "type": r["error_type"] or ""}
+            for r in recent if r["corrected"]
+        ]
+
+    if suggestions:
+        words_html = " ".join(
+            f'<span class="correction-badge badge-card">💡 {s["word"]}</span>'
+            for s in suggestions
+        )
+        st.markdown(
+            f'<div style="background:#15153d; border:1px solid #6b6bff33; '
+            f'border-radius:6px; padding:12px; margin:8px 0;">'
+            f'<span style="color:#6b6bff; font-weight:bold; font-size:0.85rem;">'
+            f'Try using these in your next answer:</span><br/>'
+            f'{words_html}</div>',
+            unsafe_allow_html=True,
+        )
+
+
 def _speak(text: str) -> bytes | None:
     """Generate TTS audio if enabled. Returns audio bytes or None."""
     if not st.session_state.tts_enabled or not text:
@@ -617,6 +655,17 @@ def _render_free_conversation() -> None:
                 )
                 st.markdown(corrections_html, unsafe_allow_html=True)
 
+    # Practice suggestions from corrections in this session
+    conn_check = get_conn()
+    session_id = st.session_state.session_id
+    if session_id:
+        has_corrections = conn_check.execute(
+            "SELECT COUNT(*) as c FROM corrections WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()["c"]
+        if has_corrections > 0:
+            _render_practice_suggestions({})
+
     # Input: voice or text
     prompt = _transcribe_voice()
     if prompt:
@@ -765,7 +814,8 @@ def _render_writing_prompt() -> None:
             data["eval_audio_played"] = True
 
         st.divider()
-        st.caption("Continue discussing, or end the session.")
+        _render_practice_suggestions(data)
+        st.caption("Try to use the suggested words! Or end the session.")
 
         if discuss_input := st.chat_input("Continue the conversation..."):
             with st.chat_message("assistant", avatar="🗡️"):
@@ -826,7 +876,11 @@ def _render_article_summary() -> None:
 
         st.divider()
         st.markdown("### 💬 Discuss the article")
-        st.caption("Continue chatting about the article, or end the session.")
+
+        # Suggestion box — words/phrases from corrections to practice
+        _render_practice_suggestions(data)
+
+        st.caption("Try to use the suggested words in your response!")
 
         # Discussion chat — reuse free conversation pattern
         if "discuss_messages" not in data:
