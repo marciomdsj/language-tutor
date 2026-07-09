@@ -115,9 +115,14 @@ def suggest_activities(conn: sqlite3.Connection) -> list[str]:
         if activity_type in scores and count >= 3:
             scores[activity_type] -= 2.0
 
-    # Sort by score descending, return top 3
+    # Sort by score descending
     ranked = sorted(scores.keys(), key=lambda k: scores[k], reverse=True)
-    return ranked[:3]
+
+    # Always include free_conversation (core activity)
+    if "free_conversation" not in ranked[:4]:
+        ranked.insert(3, "free_conversation")
+
+    return ranked[:5]
 
 
 def present_choices(suggestions: list[str]) -> str:
