@@ -758,9 +758,26 @@ def _render_writing_prompt() -> None:
                     f'<span class="correction-badge badge-error">'
                     f'✗ {c.get("user_said", "")} → {c.get("corrected", "")}</span>',
                     unsafe_allow_html=True)
-        tts_audio = _speak(data["evaluation"])
-        if tts_audio:
-            st.audio(tts_audio, format="audio/mp3", autoplay=True)
+        if not data.get("eval_audio_played"):
+            tts_audio = _speak(data["evaluation"])
+            if tts_audio:
+                st.audio(tts_audio, format="audio/mp3", autoplay=True)
+            data["eval_audio_played"] = True
+
+        st.divider()
+        st.caption("Continue discussing, or end the session.")
+
+        if discuss_input := st.chat_input("Continue the conversation..."):
+            with st.chat_message("assistant", avatar="🗡️"):
+                try:
+                    with st.spinner("Thinking..."):
+                        response = st.session_state.tutor.chat(discuss_input)
+                except Exception as e:
+                    st.error(f"LLM error: {e}")
+                    return
+                st.markdown(response.message)
+                _save_corrections(response.metadata)
+
         _render_end_session_button()
 
 
@@ -801,9 +818,53 @@ def _render_article_summary() -> None:
     elif phase == "evaluated":
         st.markdown("### Evaluation")
         st.markdown(data["evaluation"])
-        tts_audio = _speak(data["evaluation"])
-        if tts_audio:
-            st.audio(tts_audio, format="audio/mp3", autoplay=True)
+        if not data.get("eval_audio_played"):
+            tts_audio = _speak(data["evaluation"])
+            if tts_audio:
+                st.audio(tts_audio, format="audio/mp3", autoplay=True)
+            data["eval_audio_played"] = True
+
+        st.divider()
+        st.markdown("### 💬 Discuss the article")
+        st.caption("Continue chatting about the article, or end the session.")
+
+        # Discussion chat — reuse free conversation pattern
+        if "discuss_messages" not in data:
+            data["discuss_messages"] = []
+
+        for msg in data["discuss_messages"]:
+            with st.chat_message(msg["role"], avatar="🗡️" if msg["role"] == "assistant" else "👤"):
+                st.markdown(msg["content"])
+
+        if discuss_input := st.chat_input("Discuss the article..."):
+            data["discuss_messages"].append({"role": "user", "content": discuss_input})
+            with st.chat_message("user", avatar="👤"):
+                st.markdown(discuss_input)
+
+            with st.chat_message("assistant", avatar="🗡️"):
+                try:
+                    with st.spinner("Thinking..."):
+                        response = st.session_state.tutor.chat(discuss_input)
+                except Exception as e:
+                    st.error(f"LLM error: {e}")
+                    return
+                st.markdown(response.message)
+                if response.metadata.corrections:
+                    for c in response.metadata.corrections:
+                        st.markdown(
+                            f'<span class="correction-badge badge-error">'
+                            f'✗ {c.get("user_said", "")} → {c.get("corrected", "")}</span>',
+                            unsafe_allow_html=True)
+                tts_audio = _speak(response.message)
+                if tts_audio:
+                    st.audio(tts_audio, format="audio/mp3", autoplay=True)
+
+            _save_corrections(response.metadata)
+            _accumulate_srs(response.metadata)
+            data["discuss_messages"].append({
+                "role": "assistant", "content": response.message,
+            })
+
         _render_end_session_button()
 
 
@@ -844,9 +905,11 @@ def _render_error_correction() -> None:
     elif phase == "evaluated":
         st.markdown("### Results")
         st.markdown(data["evaluation"])
-        tts_audio = _speak(data["evaluation"])
-        if tts_audio:
-            st.audio(tts_audio, format="audio/mp3", autoplay=True)
+        if not data.get("eval_audio_played"):
+            tts_audio = _speak(data["evaluation"])
+            if tts_audio:
+                st.audio(tts_audio, format="audio/mp3", autoplay=True)
+            data["eval_audio_played"] = True
         _render_end_session_button()
 
 
