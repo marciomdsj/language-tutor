@@ -451,8 +451,8 @@ YOUR ROLE:
 - For {config.LEARNER_LEVEL}: focus on nuanced vocabulary, idiomatic expressions,
   subtle grammar (conditionals, subjunctive, collocations), natural phrasing.
 - Keep responses concise (2-4 sentences) to maintain conversational rhythm.
-- ALWAYS call the report_metadata tool after your response.
-- Report ALL errors via the tool, even minor ones. Never skip the tool call.
+- If the learner makes errors, point them out briefly inline (e.g. "it should be X, not Y")
+  and continue the conversation naturally. Do NOT use any tools or output JSON.
 {profile_section}{cards_section}{recent_errors_section}"""
 
 
