@@ -791,6 +791,9 @@ def _render_writing_prompt() -> None:
                         f'Learner\'s text:\n"{text}"'
                     )
                     response = st.session_state.tutor.chat(eval_prompt)
+                    # Run error check on the LEARNER'S text
+                    learner_corrections = st.session_state.tutor._error_check_pass(text)
+                    response.metadata.corrections = learner_corrections
                 _save_corrections(response.metadata)
                 _accumulate_srs(response.metadata)
                 data["evaluation"] = response.message
@@ -859,6 +862,9 @@ def _render_article_summary() -> None:
                         f'(2) Grammar and vocabulary errors? (3) Improvements.'
                     )
                     response = st.session_state.tutor.chat(eval_prompt)
+                    # Run error check on the LEARNER'S text, not the eval prompt
+                    learner_corrections = st.session_state.tutor._error_check_pass(summary)
+                    response.metadata.corrections = learner_corrections
                 _save_corrections(response.metadata)
                 _accumulate_srs(response.metadata)
                 data["evaluation"] = response.message
@@ -950,6 +956,9 @@ def _render_error_correction() -> None:
                         f"Explain what the actual error was if they missed it."
                     )
                     response = st.session_state.tutor.chat(eval_prompt)
+                    # Run error check on the LEARNER'S corrections
+                    learner_corrections = st.session_state.tutor._error_check_pass(corrections_text)
+                    response.metadata.corrections = learner_corrections
                 _save_corrections(response.metadata)
                 _accumulate_srs(response.metadata)
                 data["evaluation"] = response.message
